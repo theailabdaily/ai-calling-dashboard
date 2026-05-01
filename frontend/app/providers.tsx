@@ -6,9 +6,16 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [client] = useState(() => new QueryClient({
     defaultOptions: {
       queries: {
-        staleTime: 60_000,
-        refetchInterval: 60_000,    // near-real-time refresh every 60s
-        refetchOnWindowFocus: true,
+        // Cache analytics for 5min — they don't change second-to-second.
+        // User can hit refresh / change filters to force a refetch.
+        staleTime: 5 * 60_000,
+        gcTime: 30 * 60_000,
+        // Don't auto-refetch in the background. Avoids hitting Render free
+        // tier on every tab switch and triggering cold starts.
+        refetchInterval: false,
+        refetchOnWindowFocus: false,
+        refetchOnMount: false,
+        retry: 1,
       },
     },
   }));
