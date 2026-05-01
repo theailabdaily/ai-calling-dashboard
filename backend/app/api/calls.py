@@ -31,6 +31,7 @@ async def list_calls(
     answered_by: str | None = Query(None),
     only_with_recording: bool = Query(False),
     only_interested: bool = Query(False),
+    funnel_stage: str | None = Query(None, description="connected | engaged | interested | followup"),
     db: AsyncSession = Depends(get_db),
 ):
     base = (
@@ -58,6 +59,25 @@ async def list_calls(
         extra.append(CallLog.recording_url.isnot(None))
     if only_interested:
         extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
+
+    # Funnel stage filter — for the "click on funnel stage" drill-down
+    if funnel_stage:
+        is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
+        if funnel_stage == "connected":
+            extra.append(is_connected)
+        elif funnel_stage == "engaged":
+            extra.append(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
+        elif funnel_stage == "interested":
+            extra.append(and_(
+                is_connected,
+                func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+            ))
+        elif funnel_stage == "followup":
+            extra.append(and_(
+                is_connected,
+                func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+            ))
+
     if extra:
         base = base.where(and_(*extra))
 
