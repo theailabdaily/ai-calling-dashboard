@@ -32,7 +32,10 @@ export const api = {
   vendorComparison: (f: Filters) => jget<VendorRow[]>(`/api/overview/vendor-comparison?${buildQuery(f)}`),
   campaignBreakdown: (f: Filters) => jget<CampaignRow[]>(`/api/campaigns/breakdown?${buildQuery(f)}`),
 
-  exportCallsUrl: (f: Filters) => `${API_BASE}/api/export/calls.csv?${buildQuery(f)}`,
+  exportCallsUrl: (f: Filters, funnel_stage?: string) => {
+    const q = buildQuery(f);
+    return `${API_BASE}/api/export/calls.csv?${q}${funnel_stage ? `&funnel_stage=${funnel_stage}` : ''}`;
+  },
   triggerSync: (slug: string) =>
     fetch(`${API_BASE}/api/vendors/${slug}/sync`, { method: 'POST' }).then(r => r.json()),
   importSheet: (sheet_id: string, worksheet_name?: string) =>
@@ -47,6 +50,7 @@ export const api = {
     f: Filters; page?: number; page_size?: number; search?: string;
     status?: string; answered_by?: string;
     only_with_recording?: boolean; only_interested?: boolean;
+    funnel_stage?: string;
   }): Promise<CallListPage> => {
     const q = new URLSearchParams(buildQuery(params.f));
     if (params.page) q.set('page', String(params.page));
@@ -56,6 +60,7 @@ export const api = {
     if (params.answered_by) q.set('answered_by', params.answered_by);
     if (params.only_with_recording) q.set('only_with_recording', 'true');
     if (params.only_interested) q.set('only_interested', 'true');
+    if (params.funnel_stage) q.set('funnel_stage', params.funnel_stage);
     return jget<CallListPage>(`/api/calls?${q.toString()}`);
   },
   callDetail: (id: string) => jget<CallDetail>(`/api/calls/${id}`),
