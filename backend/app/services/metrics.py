@@ -202,31 +202,38 @@ async def campaign_breakdown(db: AsyncSession, filters: MetricFilters) -> list[d
             Campaign.id.label("campaign_id"),
             Campaign.name.label("campaign_name"),
             Campaign.vendor_id,
+            Vendor.name.label("vendor_name"),
             Campaign.started_at,
             func.count(CallLog.id).label("total"),
             func.sum(case((_is_connected, 1), else_=0)).label("connected"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
         )
         .join(CallLog, CallLog.campaign_id == Campaign.id)
-        .group_by(Campaign.id, Campaign.name, Campaign.vendor_id, Campaign.started_at)
+        .join(Vendor, Vendor.id == Campaign.vendor_id)
+        .group_by(Campaign.id, Campaign.name, Campaign.vendor_id, Vendor.name, Campaign.started_at)
         .order_by(Campaign.started_at.desc())
     )
     stmt = filters.apply(stmt)
     rows = (await db.execute(stmt)).all()
-    return [
-        {
+    out = []
+    for r in rows:
+        date_str = r.started_at.strftime("%Y-%m-%d") if r.started_at else None
+        parts = [p for p in (date_str, r.vendor_name, r.campaign_name) if p]
+        display = " — ".join(parts)
+        out.append({
             "campaign_id": str(r.campaign_id),
             "campaign_name": r.campaign_name,
+            "display_name": display,
             "vendor_id": str(r.vendor_id),
+            "vendor_name": r.vendor_name,
             "started_at": r.started_at.isoformat() if r.started_at else None,
             "total_calls": int(r.total or 0),
             "connected_calls": int(r.connected or 0),
             "interested_calls": int(r.interested or 0),
             "connection_rate": _safe_div(int(r.connected or 0), int(r.total or 0)),
             "interest_rate": _safe_div(int(r.interested or 0), int(r.connected or 0)),
-        }
-        for r in rows
-    ]
+        })
+    return out
 
 
 def default_window() -> tuple[datetime, datetime]:
