@@ -12,9 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import agents, calls, exports, ingestion, overview, vendors
 from app.config import get_settings
 from app.jobs.sync import sync_all_vendors
-from app.middleware.auth import BasicAuthMiddleware
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s -- %(message)s")
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
@@ -24,7 +23,7 @@ scheduler = AsyncIOScheduler()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.disable_internal_scheduler:
-        logger.info("internal scheduler disabled — relying on external cron")
+        logger.info("internal scheduler disabled -- relying on external cron")
     else:
         scheduler.add_job(
             sync_all_vendors,
@@ -41,12 +40,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
+# CORS middleware -- must be added before any others so it wraps exception responses.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.include_router(overview.router)
@@ -60,3 +61,8 @@ app.include_router(ingestion.router)
 @app.get("/health")
 async def health():
     return {"status": "ok", "env": settings.environment}
+
+
+@app.get("/")
+async def root():
+    return {"service": settings.app_name, "status": "ok"}
