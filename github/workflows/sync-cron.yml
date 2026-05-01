@@ -1,0 +1,33 @@
+name: Sync vendors + keep Render awake
+
+# Runs every 15 minutes. Free tier of GitHub Actions = 2000 min/month.
+# A single run takes ~10 sec, so this uses ~30 min/month. Plenty of headroom.
+#
+# This both:
+#   1. Runs the sync (so we don't depend on APScheduler).
+#   2. Pings the Render free instance frequently enough that it never goes to sleep.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Hunar sync
+        env:
+          API_BASE: ${{ secrets.API_BASE }}                    # https://your-app.onrender.com
+          DASHBOARD_USERNAME: ${{ secrets.DASHBOARD_USERNAME }}
+          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+        run: |
+          set -e
+          AUTH=$(echo -n "$DASHBOARD_USERNAME:$DASHBOARD_PASSWORD" | base64)
+          # Health check first (also wakes the dyno)
+          curl -fsS "$API_BASE/health" > /dev/null
+          # Trigger sync
+          curl -fsS -X POST \
+            -H "Authorization: Basic $AUTH" \
+            "$API_BASE/api/vendors/hunar/sync"
+          echo "Sync triggered"
