@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 import io
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,8 +28,10 @@ CSV_FIELDS = [
 @router.get("/calls.csv")
 async def export_calls(
     filters: MetricFilters = Depends(parse_filters),
+    funnel_stage: str | None = Query(None, description="connected | engaged | interested | followup"),
     db: AsyncSession = Depends(get_db),
 ):
+    from sqlalchemy import and_, func
     stmt = (
         select(CallLog, Vendor.name.label("vendor_name"), Campaign.name.label("campaign_name"))
         .join(Vendor, Vendor.id == CallLog.vendor_id)
@@ -38,6 +40,24 @@ async def export_calls(
         .limit(50000)
     )
     stmt = filters.apply(stmt)
+
+    # Optional funnel stage filter — matches calls.py logic exactly
+    if funnel_stage:
+        is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
+        if funnel_stage == "connected":
+            stmt = stmt.where(is_connected)
+        elif funnel_stage == "engaged":
+            stmt = stmt.where(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
+        elif funnel_stage == "interested":
+            stmt = stmt.where(and_(
+                is_connected,
+                func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+            ))
+        elif funnel_stage == "followup":
+            stmt = stmt.where(and_(
+                is_connected,
+                func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+            ))
 
     async def gen():
         buf = io.StringIO()
