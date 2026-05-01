@@ -21,7 +21,9 @@ class VendorOut(BaseModel):
 class CampaignOut(BaseModel):
     id: UUID
     name: str
+    display_name: str | None = None   # "{date} — {vendor} — {name}"
     vendor_id: UUID
+    vendor_name: str | None = None
     vendor_request_id: str
     agent_id: UUID | None
     started_at: datetime | None
@@ -87,7 +89,9 @@ class VendorRow(BaseModel):
 class CampaignRow(BaseModel):
     campaign_id: str
     campaign_name: str
+    display_name: str | None = None   # "{date} — {vendor} — {name}"
     vendor_id: str
+    vendor_name: str | None = None
     started_at: str | None
     total_calls: int
     connected_calls: int
