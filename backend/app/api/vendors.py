@@ -32,8 +32,30 @@ async def vendors_comparison(
 
 @router.get("/campaigns", response_model=list[CampaignOut])
 async def list_campaigns(db: AsyncSession = Depends(get_db)):
-    rows = (await db.execute(select(Campaign).order_by(Campaign.started_at.desc().nullslast()))).scalars().all()
-    return rows
+    stmt = (
+        select(Campaign, Vendor.name.label("vendor_name"))
+        .join(Vendor, Vendor.id == Campaign.vendor_id)
+        .order_by(Campaign.started_at.desc().nullslast())
+    )
+    result = await db.execute(stmt)
+    out: list[CampaignOut] = []
+    for row in result:
+        c: Campaign = row[0]
+        date_str = c.started_at.strftime("%Y-%m-%d") if c.started_at else None
+        parts = [p for p in (date_str, row.vendor_name, c.name) if p]
+        display = " — ".join(parts)
+        out.append(CampaignOut(
+            id=c.id,
+            name=c.name,
+            display_name=display,
+            vendor_id=c.vendor_id,
+            vendor_name=row.vendor_name,
+            vendor_request_id=c.vendor_request_id,
+            agent_id=c.agent_id,
+            started_at=c.started_at,
+            expected_calls=c.expected_calls,
+        ))
+    return out
 
 
 @router.get("/campaigns/breakdown", response_model=list[CampaignRow])
