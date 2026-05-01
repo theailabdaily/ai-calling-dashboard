@@ -41,13 +41,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
-# Auth gate FIRST — before CORS, so 401s never trigger CORS preflight weirdness.
-app.add_middleware(
-    BasicAuthMiddleware,
-    username=settings.dashboard_username,
-    password=settings.dashboard_password,
-)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
