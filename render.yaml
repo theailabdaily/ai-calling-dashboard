@@ -1,0 +1,30 @@
+# Render blueprint. Push to GitHub, then "New → Blueprint" in Render and point
+# at your repo. Render reads this file and creates the service automatically.
+#
+# After it boots, set the env vars marked sync:false in the Render dashboard.
+services:
+  - type: web
+    name: ai-calling-dashboard-api
+    runtime: docker
+    repo: ""           # Render fills this from the connected repo
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DISABLE_INTERNAL_SCHEDULER
+        value: "true"          # using GitHub Actions cron instead
+      - key: SYNC_CALLS_INTERVAL_MINUTES
+        value: "15"
+      - key: DATABASE_URL
+        sync: false            # set in dashboard — Supabase pooler URL
+      - key: HUNAR_API_KEY
+        sync: false
+      - key: PUBLIC_WEBHOOK_BASE_URL
+        sync: false            # set to your own Render URL after first deploy
+      - key: DASHBOARD_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false            # ["https://your-frontend.vercel.app"]

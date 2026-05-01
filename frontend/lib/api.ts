@@ -1,0 +1,93 @@
+import type {
+  Agent, AgentPerformanceRow, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
+  FunnelStage, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
+  Vendor, VendorRow,
+} from '@/types';
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+
+function buildQuery(f: Filters): string {
+  const p = new URLSearchParams();
+  p.set('start', f.start.toISOString());
+  p.set('end', f.end.toISOString());
+  for (const v of f.vendor_ids) p.append('vendor_ids', v);
+  for (const c of f.campaign_ids) p.append('campaign_ids', c);
+  return p.toString();
+}
+
+async function jget<T>(path: string): Promise<T> {
+  const r = await fetch(`${API_BASE}${path}`, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`${path} → ${r.status}`);
+  return r.json();
+}
+
+export const api = {
+  vendors: () => jget<Vendor[]>('/api/vendors'),
+  campaigns: () => jget<Campaign[]>('/api/campaigns'),
+  agents: () => jget<Agent[]>('/api/agents'),
+
+  overviewMetrics: (f: Filters) => jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
+  timeSeries: (f: Filters, bucket = 'day') => jget<TimeBucket[]>(`/api/overview/time-series?bucket=${bucket}&${buildQuery(f)}`),
+  funnel: (f: Filters) => jget<FunnelStage[]>(`/api/overview/funnel?${buildQuery(f)}`),
+  vendorComparison: (f: Filters) => jget<VendorRow[]>(`/api/overview/vendor-comparison?${buildQuery(f)}`),
+  campaignBreakdown: (f: Filters) => jget<CampaignRow[]>(`/api/campaigns/breakdown?${buildQuery(f)}`),
+
+  exportCallsUrl: (f: Filters) => `${API_BASE}/api/export/calls.csv?${buildQuery(f)}`,
+  triggerSync: (slug: string) =>
+    fetch(`${API_BASE}/api/vendors/${slug}/sync`, { method: 'POST' }).then(r => r.json()),
+  importSheet: (sheet_id: string, worksheet_name?: string) =>
+    fetch(`${API_BASE}/api/ingest/google-sheets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet_id, worksheet_name }),
+    }).then(r => r.json()),
+
+  // Calls list + detail
+  callsList: (params: {
+    f: Filters; page?: number; page_size?: number; search?: string;
+    status?: string; answered_by?: string;
+    only_with_recording?: boolean; only_interested?: boolean;
+  }): Promise<CallListPage> => {
+    const q = new URLSearchParams(buildQuery(params.f));
+    if (params.page) q.set('page', String(params.page));
+    if (params.page_size) q.set('page_size', String(params.page_size));
+    if (params.search) q.set('search', params.search);
+    if (params.status) q.set('status', params.status);
+    if (params.answered_by) q.set('answered_by', params.answered_by);
+    if (params.only_with_recording) q.set('only_with_recording', 'true');
+    if (params.only_interested) q.set('only_interested', 'true');
+    return jget<CallListPage>(`/api/calls?${q.toString()}`);
+  },
+  callDetail: (id: string) => jget<CallDetail>(`/api/calls/${id}`),
+
+  // Agent performance
+  agentPerformance: (f: Filters) =>
+    jget<AgentPerformanceRow[]>(`/api/agents/performance?${buildQuery(f)}`),
+
+  // Trigger a campaign (Sheets → vendor)
+  triggerCampaign: (req: TriggerCampaignRequest): Promise<TriggerCampaignResponse> =>
+    fetch(`${API_BASE}/api/ingest/push-to-vendor`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    }).then(async r => {
+      if (!r.ok) throw new Error((await r.json()).detail || 'Request failed');
+      return r.json();
+    }),
+};
+
+// Number formatting helpers (Indian locale)
+export const fmt = {
+  int: (n: number) => new Intl.NumberFormat('en-IN').format(Math.round(n)),
+  pct: (n: number, digits = 1) => `${(n * 100).toFixed(digits)}%`,
+  duration: (sec: number) => {
+    if (!sec || sec < 1) return '0s';
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return m ? `${m}m ${s}s` : `${s}s`;
+  },
+};
+
+export function cn(...classes: (string | false | null | undefined)[]): string {
+  return classes.filter(Boolean).join(' ');
+}
