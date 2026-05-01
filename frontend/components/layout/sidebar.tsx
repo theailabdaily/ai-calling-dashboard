@@ -16,7 +16,7 @@ const NAV = [
 export default function Sidebar() {
   const pathname = usePathname();
   return (
-    <aside className="w-64 shrink-0 bg-brand-navy text-white min-h-screen flex flex-col">
+    <aside className="w-64 shrink-0 bg-black text-white min-h-screen flex flex-col">
       <div className="p-5 border-b border-white/10">
         <Image
           src="/logo-light.png"
