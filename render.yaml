@@ -6,7 +6,6 @@ services:
   - type: web
     name: ai-calling-dashboard-api
     runtime: docker
-    repo: ""           # Render fills this from the connected repo
     rootDir: backend
     dockerfilePath: ./Dockerfile
     plan: free
