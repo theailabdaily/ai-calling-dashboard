@@ -39,12 +39,12 @@ class MetricFilters:
     campaign_ids: list[UUID] | None = None
     agent_ids: list[UUID] | None = None
 
-    def apply(self, stmt):
+       def apply(self, stmt):
         conds = []
         if self.start:
-            conds.append(CallLog.started_at >= self.start)
+            conds.append(CallLog.vendor_created_at >= self.start)
         if self.end:
-            conds.append(CallLog.started_at <= self.end)
+            conds.append(CallLog.vendor_created_at <= self.end)
         if self.vendor_ids:
             conds.append(CallLog.vendor_id.in_(self.vendor_ids))
         if self.campaign_ids:
@@ -113,7 +113,7 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
 # Calls over time — bucketed by day for the line chart
 # ---------------------------------------------------------------------------
 async def calls_over_time(db: AsyncSession, filters: MetricFilters, bucket: str = "day") -> list[dict[str, Any]]:
-    trunc = func.date_trunc(bucket, CallLog.started_at)
+    trunc = func.date_trunc(bucket, CallLog.vendor_created_at)
     stmt = (
         select(
             trunc.label("bucket"),
