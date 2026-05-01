@@ -57,7 +57,7 @@ async def list_calls(
     if only_with_recording:
         extra.append(CallLog.recording_url.isnot(None))
     if only_interested:
-        extra.append(func.lower(CallLog.result["interested"].astext).in_(["yes", "true", "interested"]))
+        extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
     if extra:
         base = base.where(and_(*extra))
 
@@ -75,8 +75,11 @@ async def list_calls(
     items = []
     for row in rows:
         c: CallLog = row[0]
-        interested = c.result.get("interested") if isinstance(c.result, dict) else None
-        follow_up = c.result.get("follow_up_at") if isinstance(c.result, dict) else None
+        # Hunar JSONB schema: interest_level (HIGH/MEDIUM/LOW) and follow_up_time
+        interested = c.result.get("interest_level") if isinstance(c.result, dict) else None
+        follow_up_raw = c.result.get("follow_up_time") if isinstance(c.result, dict) else None
+        # Hunar uses "NA" / "NOT AVAILABLE" / "Not Covered" as null sentinels — collapse those
+        follow_up = follow_up_raw if follow_up_raw and follow_up_raw.upper() not in ("NA", "NOT AVAILABLE", "NOT COVERED") else None
         items.append(CallListItem(
             id=c.id,
             vendor_name=row.vendor_name,
