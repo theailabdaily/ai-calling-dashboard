@@ -59,9 +59,11 @@ class MetricFilters:
 # Reusable expressions
 _is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
 _is_engaged = CallLog.engagement_status == "ENGAGED"
-# JSONB key check — `interested` is the Hunar convention. We accept truthy values.
-_is_interested = func.lower(CallLog.result["interested"].astext).in_(["yes", "true", "interested"])
-_has_follow_up = CallLog.result["follow_up_at"].astext.isnot(None)
+# JSONB key check — Hunar uses qualitative levels.
+# interest_level: HIGH | MEDIUM | LOW | "Not Covered" | "NOT AVAILABLE"
+# next_step_interest: CALLBACK | NONE | UNSURE | "Not Covered" | "NOT AVAILABLE"
+_is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
+_has_follow_up = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
 
 
 def _safe_div(num: float | int | None, den: float | int | None) -> float:
