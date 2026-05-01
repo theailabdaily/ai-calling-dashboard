@@ -1,13 +1,15 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { Search, Filter, Volume2, ChevronLeft, ChevronRight, Star } from 'lucide-react';
+import { Search, Volume2, ChevronLeft, ChevronRight, Star } from 'lucide-react';
 import { useState } from 'react';
-import { format, formatDistanceToNow } from 'date-fns';
+import { formatDistanceToNow } from 'date-fns';
 
 import FilterBar from '@/components/filters/filter-bar';
+import InsightsPanel from '@/components/ui/insights-panel';
 import CallDetailDrawer from '@/components/calls/call-detail-drawer';
 import { StatusBadge } from '@/components/ui/badge';
 import { api, fmt } from '@/lib/api';
+import { callsInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
 
 const initialFilters: Filters = {
@@ -44,6 +46,7 @@ export default function CallsPage() {
   });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
+  const insights = callsInsights(calls.data);
 
   const totalPages = calls.data ? Math.max(1, Math.ceil(calls.data.total / calls.data.page_size)) : 1;
 
@@ -57,6 +60,8 @@ export default function CallsPage() {
       </header>
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
+
+      <InsightsPanel insights={insights} subtitle="Patterns from the calls visible right now" />
 
       {/* Search + toggles row */}
       <div className="card p-4 flex flex-wrap items-center gap-3">
@@ -130,10 +135,10 @@ export default function CallsPage() {
                   </td>
                   <td className="px-3 py-3 text-xs">
                     {c.interested && (
-                      <span className="text-emerald-700 font-medium">Interested: {c.interested}</span>
+                      <span className="text-emerald-700 font-medium">Interest: {c.interested}</span>
                     )}
                     {c.follow_up_at && !c.interested && (
-                      <span className="text-brand-pink font-medium">Follow-up booked</span>
+                      <span className="text-brand-pink font-medium">Callback: {c.follow_up_at}</span>
                     )}
                   </td>
                   <td className="px-5 py-3 text-right">
