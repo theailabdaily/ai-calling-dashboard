@@ -4,7 +4,9 @@ import { useState } from 'react';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 
 import FilterBar from '@/components/filters/filter-bar';
+import InsightsPanel from '@/components/ui/insights-panel';
 import { api, fmt } from '@/lib/api';
+import { agentInsights } from '@/lib/insights';
 import type { AgentPerformanceRow, Filters } from '@/types';
 
 const initialFilters: Filters = {
@@ -34,6 +36,7 @@ export default function AgentsPage() {
   });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
+  const insights = agentInsights(perf.data);
 
   const sorted: AgentPerformanceRow[] = [...(perf.data || [])].sort(
     (a, b) => (b[sortBy] as number) - (a[sortBy] as number)
@@ -56,12 +59,14 @@ export default function AgentsPage() {
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
 
+      <InsightsPanel insights={insights} subtitle="Per-agent patterns from the active window" />
+
       {/* Top-10 chart */}
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-brand-navy mb-1">Top 10 agents</h3>
         <p className="text-xs text-surface-500 mb-4">
           Connection vs interest rate. The gap between the two tells you whether a script <em>opens</em>
-          {' '}well but doesn't <em>convert</em>.
+          {' '}well but doesn&apos;t <em>convert</em>.
         </p>
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
