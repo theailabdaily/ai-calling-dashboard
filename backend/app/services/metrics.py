@@ -39,7 +39,7 @@ class MetricFilters:
     campaign_ids: list[UUID] | None = None
     agent_ids: list[UUID] | None = None
 
-def apply(self, stmt):
+    def apply(self, stmt):
         conds = []
         if self.start:
             conds.append(CallLog.vendor_created_at >= self.start)
