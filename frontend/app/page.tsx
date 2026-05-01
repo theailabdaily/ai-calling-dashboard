@@ -4,13 +4,17 @@ import { useState } from 'react';
 import FilterBar from '@/components/filters/filter-bar';
 import MetricCard from '@/components/ui/metric-card';
 import CallsOverTime from '@/components/charts/calls-over-time';
-import FunnelChart from '@/components/charts/funnel';
+import FunnelChart, { FunnelStageKey } from '@/components/charts/funnel';
 import VendorBars from '@/components/charts/vendor-bars';
+import InsightsPanel from '@/components/ui/insights-panel';
+import FunnelStageDrawer from '@/components/calls/funnel-stage-drawer';
+import CallDetailDrawer from '@/components/calls/call-detail-drawer';
 import { api, fmt } from '@/lib/api';
+import { overviewInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
 
 const initialFilters: Filters = {
-  start: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
+  start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
   end: new Date(),
   vendor_ids: [],
   campaign_ids: [],
@@ -18,15 +22,16 @@ const initialFilters: Filters = {
 
 export default function OverviewPage() {
   const [filters, setFilters] = useState<Filters>(initialFilters);
+  const [stage, setStage] = useState<{ key: FunnelStageKey; label: string } | null>(null);
+  const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
 
   const metrics = useQuery({ queryKey: ['metrics', filters], queryFn: () => api.overviewMetrics(filters) });
   const series  = useQuery({ queryKey: ['series', filters],  queryFn: () => api.timeSeries(filters) });
   const funnel  = useQuery({ queryKey: ['funnel', filters],  queryFn: () => api.funnel(filters) });
   const vcomp   = useQuery({ queryKey: ['vcomp', filters],   queryFn: () => api.vendorComparison(filters) });
 
-  const handleExport = () => {
-    window.open(api.exportCallsUrl(filters), '_blank');
-  };
+  const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
+  const insights = overviewInsights(metrics.data, funnel.data, vcomp.data, series.data);
 
   return (
     <div className="p-6 space-y-5 max-w-[1400px]">
@@ -76,10 +81,29 @@ export default function OverviewPage() {
         <div className="lg:col-span-2">
           <CallsOverTime data={series.data || []} />
         </div>
-        <FunnelChart data={funnel.data || []} />
+        <FunnelChart
+          data={funnel.data || []}
+          onStageClick={(key, label) => setStage({ key, label })}
+        />
       </div>
 
+      <InsightsPanel
+        insights={insights}
+        subtitle="Auto-generated observations from this date range"
+      />
+
       <VendorBars data={vcomp.data || []} metric="connection_rate" />
+
+      {/* Funnel stage drawer — opens when a stage is clicked */}
+      <FunnelStageDrawer
+        filters={filters}
+        stage={stage?.key || null}
+        stageLabel={stage?.label || ''}
+        onClose={() => setStage(null)}
+        onCallClick={(id) => setSelectedCallId(id)}
+      />
+
+      <CallDetailDrawer callId={selectedCallId} onClose={() => setSelectedCallId(null)} />
     </div>
   );
 }
