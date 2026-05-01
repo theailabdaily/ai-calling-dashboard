@@ -10,7 +10,7 @@ import { api, fmt } from '@/lib/api';
 import type { Filters } from '@/types';
 
 const initialFilters: Filters = {
-  start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+  start: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000),
   end: new Date(),
   vendor_ids: [],
   campaign_ids: [],
