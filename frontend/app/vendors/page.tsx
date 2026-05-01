@@ -5,7 +5,9 @@ import FilterBar from '@/components/filters/filter-bar';
 import VendorBars from '@/components/charts/vendor-bars';
 import VendorTable from '@/components/tables/vendor-table';
 import CampaignTable from '@/components/tables/campaign-table';
+import InsightsPanel from '@/components/ui/insights-panel';
 import { api } from '@/lib/api';
+import { vendorInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
 
 const initialFilters: Filters = {
@@ -32,6 +34,7 @@ export default function VendorsPage() {
   const cbreak    = useQuery({ queryKey: ['cbreak', filters],    queryFn: () => api.campaignBreakdown(filters) });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
+  const insights = vendorInsights(vcomp.data, cbreak.data);
 
   return (
     <div className="p-6 space-y-5 max-w-[1400px]">
@@ -43,6 +46,8 @@ export default function VendorsPage() {
       </header>
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
+
+      <InsightsPanel insights={insights} subtitle="Vendor + campaign-level observations" />
 
       <VendorTable data={vcomp.data || []} />
 
