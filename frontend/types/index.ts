@@ -8,7 +8,9 @@ export type Vendor = {
 export type Campaign = {
   id: string;
   name: string;
+  display_name?: string | null;
   vendor_id: string;
+  vendor_name?: string | null;
   vendor_request_id: string;
   agent_id: string | null;
   started_at: string | null;
@@ -59,7 +61,9 @@ export type VendorRow = {
 export type CampaignRow = {
   campaign_id: string;
   campaign_name: string;
+  display_name?: string | null;
   vendor_id: string;
+  vendor_name?: string | null;
   started_at: string | null;
   total_calls: number;
   connected_calls: number;
