@@ -233,3 +233,14 @@ export type Filters = {
   vendor_ids: string[];
   campaign_ids: string[];
 };
+
+export type OutcomeRow = {
+  outcome: string;
+  count: number;
+  pct: number;
+};
+
+export type OutcomeDistribution = {
+  by_call: OutcomeRow[];
+  by_lead: OutcomeRow[];
+};
