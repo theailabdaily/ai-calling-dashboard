@@ -80,6 +80,54 @@ class HourBucket(BaseModel):
     interest_rate: float
 
 
+class DowBucket(BaseModel):
+    dow: int                 # 1=Mon ... 7=Sun (ISODOW)
+    dow_name: str            # "Mon", "Tue", ...
+    total_calls: int
+    connected_calls: int
+    engaged_calls: int
+    interested_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+
+
+class HeatmapCell(BaseModel):
+    dow: int
+    dow_name: str
+    hour: int
+    total_calls: int
+    connected_calls: int
+    engaged_calls: int
+    interested_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+
+
+class VendorHourSplit(BaseModel):
+    vendor_id: str
+    vendor_name: str
+    hours: list[HourBucket]
+
+
+class CampaignHourSplit(BaseModel):
+    campaign_id: str
+    campaign_name: str
+    display_name: str | None = None
+    hours: list[HourBucket]
+
+
+class HourlyInsights(BaseModel):
+    hour_breakdown: list[HourBucket]
+    dow_breakdown:  list[DowBucket]
+    heatmap:        list[HeatmapCell]
+    by_vendor:      list[VendorHourSplit]
+    by_campaign:    list[CampaignHourSplit]
+
+
 class FunnelStage(BaseModel):
     stage: str
     count: int
@@ -205,17 +253,3 @@ class TriggerCampaignResponse(BaseModel):
     recipients_pushed: int
     vendor_response: dict[str, Any] | None = None
     warning: str | None = None
-
-
-class CsvRecipient(BaseModel):
-    callee_name: str
-    mobile_number: str
-    custom_data: dict[str, Any] = {}
-
-
-class PushRecipientsRequest(BaseModel):
-    """Direct-recipient launch — used by CSV upload path. No sheet involved."""
-    vendor_slug: str
-    vendor_agent_id: str
-    campaign_name: str | None = None
-    recipients: list[CsvRecipient]
