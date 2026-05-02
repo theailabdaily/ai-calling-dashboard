@@ -1,60 +1,427 @@
-'use client';
-import Link from 'next/link';
-import Image from 'next/image';
-import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users, Phone, Bot, Send, RefreshCw } from 'lucide-react';
-import { cn } from '@/lib/api';
+// Pure data → insights logic. Each page calls the relevant function.
+// Insights are data-driven, not generic — they reference real numbers from the dataset.
 
-const NAV = [
-  { href: '/',           label: 'Overview',         icon: LayoutDashboard },
-  { href: '/vendors',    label: 'Vendor Analysis',  icon: Users },
-  { href: '/agents',     label: 'Agent Performance', icon: Bot },
-  { href: '/calls',      label: 'Call Logs',        icon: Phone },
-  { href: '/campaigns/new', label: 'Launch Campaign', icon: Send },
-];
+import type {
+  AgentPerformanceRow, CampaignRow, CallListPage, FunnelStage, HourlyInsights,
+  OverviewMetrics, TimeBucket, VendorRow,
+} from '@/types';
+import type { Insight } from '@/components/ui/insights-panel';
 
-export default function Sidebar() {
-  const pathname = usePathname();
-  return (
-    <aside className="w-64 shrink-0 bg-black text-white min-h-screen flex flex-col">
-      <div className="p-5 border-b border-white/10">
-        <Image
-          src="/logo-light.png"
-          alt="Testbook Supercoaching"
-          width={180}
-          height={48}
-          className="h-12 w-auto"
-          priority
-        />
-        <p className="text-xs text-white/60 mt-3 leading-tight">AI Calling Analytics</p>
-      </div>
+const pct = (n: number, d = 1) => `${(n * 100).toFixed(d)}%`;
+const intf = (n: number) => new Intl.NumberFormat('en-IN').format(Math.round(n));
 
-      <nav className="flex-1 py-4 px-3">
-        {NAV.map(item => {
-          const active = pathname === item.href;
-          const Icon = item.icon;
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors mb-1',
-                active ? 'bg-brand-pink text-white' : 'text-white/70 hover:bg-white/5 hover:text-white',
-              )}
-            >
-              <Icon size={18} />
-              {item.label}
-            </Link>
-          );
-        })}
-      </nav>
+// ---------------------------------------------------------------------------
+// Overview
+// ---------------------------------------------------------------------------
+export function overviewInsights(
+  metrics: OverviewMetrics | undefined,
+  funnel: FunnelStage[] | undefined,
+  vcomp: VendorRow[] | undefined,
+  series: TimeBucket[] | undefined,
+): Insight[] {
+  if (!metrics || !funnel) return [];
+  const out: Insight[] = [];
 
-      <div className="p-4 border-t border-white/10 text-xs text-white/40">
-        <div className="flex items-center gap-2">
-          <RefreshCw size={12} className="animate-spin" style={{ animationDuration: '4s' }} />
-          Auto-refresh: 60s
-        </div>
-      </div>
-    </aside>
-  );
+  // 1. Connection rate health (industry benchmark: ~30-45% for outbound EdTech)
+  const cr = metrics.connection_rate;
+  if (metrics.total_calls > 0) {
+    if (cr >= 0.40) {
+      out.push({
+        tone: 'positive',
+        title: `Connection rate is strong at ${pct(cr)}`,
+        detail: `${intf(metrics.connected_calls)} of ${intf(metrics.total_calls)} dialed picked up by a human. Above the 30–40% outbound benchmark.`,
+      });
+    } else if (cr >= 0.30) {
+      out.push({
+        tone: 'neutral',
+        title: `Connection rate ${pct(cr)} — within range`,
+        detail: `${intf(metrics.connected_calls)} of ${intf(metrics.total_calls)} dialed connected. Outbound EdTech typically sees 30–45%.`,
+      });
+    } else {
+      out.push({
+        tone: 'warning',
+        title: `Connection rate is low at ${pct(cr)}`,
+        detail: `Only ${intf(metrics.connected_calls)} of ${intf(metrics.total_calls)} dialed picked up. Investigate caller ID, dial timing, or list quality.`,
+      });
+    }
+  }
+
+  // 2. Funnel biggest drop-off
+  if (funnel.length >= 2) {
+    let worstDrop = 0;
+    let worstPair: [FunnelStage, FunnelStage] | null = null;
+    for (let i = 1; i < funnel.length; i++) {
+      const prev = funnel[i - 1].count;
+      const curr = funnel[i].count;
+      if (prev > 0) {
+        const drop = (prev - curr) / prev;
+        if (drop > worstDrop) {
+          worstDrop = drop;
+          worstPair = [funnel[i - 1], funnel[i]];
+        }
+      }
+    }
+    if (worstPair && worstDrop > 0.4) {
+      out.push({
+        tone: 'info',
+        title: `Biggest drop-off: ${worstPair[0].stage} → ${worstPair[1].stage}`,
+        detail: `${pct(worstDrop)} lost between these stages (${intf(worstPair[0].count)} → ${intf(worstPair[1].count)}). Likely the highest-leverage step to optimize.`,
+      });
+    }
+  }
+
+  // 3. Engaged → interested conversion (script effectiveness)
+  if (metrics.engaged_calls > 0) {
+    const engagedToInterested = metrics.interested_calls / metrics.engaged_calls;
+    if (engagedToInterested < 0.4 && metrics.engaged_calls >= 20) {
+      out.push({
+        tone: 'warning',
+        title: `Script opens but doesn't close`,
+        detail: `${intf(metrics.engaged_calls)} engaged but only ${intf(metrics.interested_calls)} reached interested (${pct(engagedToInterested)}). Hook works, the pitch may not.`,
+      });
+    } else if (engagedToInterested >= 0.6 && metrics.engaged_calls >= 20) {
+      out.push({
+        tone: 'positive',
+        title: `Strong engaged-to-interested conversion`,
+        detail: `${pct(engagedToInterested)} of engaged calls reached interested. Script is converting well.`,
+      });
+    }
+  }
+
+  // 4. Vendor concentration
+  if (vcomp && vcomp.length > 1) {
+    const sorted = [...vcomp].sort((a, b) => b.total_calls - a.total_calls);
+    const top = sorted[0];
+    const totalAll = sorted.reduce((s, v) => s + v.total_calls, 0);
+    if (totalAll > 0) {
+      const share = top.total_calls / totalAll;
+      if (share > 0.8) {
+        out.push({
+          tone: 'info',
+          title: `${top.vendor_name} drove ${pct(share, 0)} of volume`,
+          detail: `Concentration risk if this vendor goes down. Consider distributing more volume to alternatives.`,
+        });
+      }
+    }
+  }
+
+  // 5. Volume trend (compare last 3 buckets vs first 3)
+  if (series && series.length >= 6) {
+    const firstHalf = series.slice(0, 3).reduce((s, b) => s + b.total, 0);
+    const lastHalf = series.slice(-3).reduce((s, b) => s + b.total, 0);
+    if (firstHalf > 0) {
+      const change = (lastHalf - firstHalf) / firstHalf;
+      if (Math.abs(change) > 0.25) {
+        out.push({
+          tone: change > 0 ? 'positive' : 'warning',
+          title: `Volume trending ${change > 0 ? 'up' : 'down'} ${pct(Math.abs(change), 0)}`,
+          detail: `Recent ${intf(lastHalf)} calls vs earlier ${intf(firstHalf)} in this window.`,
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Vendor analysis
+// ---------------------------------------------------------------------------
+export function vendorInsights(vcomp: VendorRow[] | undefined, cbreak: CampaignRow[] | undefined): Insight[] {
+  if (!vcomp || !vcomp.length) return [];
+  const out: Insight[] = [];
+
+  // Active vs underused vendors
+  const active = vcomp.filter(v => v.total_calls >= 50);
+  const underused = vcomp.filter(v => v.total_calls > 0 && v.total_calls < 50);
+  if (underused.length > 0) {
+    out.push({
+      tone: 'info',
+      title: `${underused.length} vendor${underused.length > 1 ? 's' : ''} below comparison threshold`,
+      detail: `${underused.map(v => v.vendor_name).join(', ')} ran fewer than 50 calls — too small a sample for fair comparison.`,
+    });
+  }
+
+  if (active.length >= 2) {
+    // Best vendor by interest rate
+    const byInterest = [...active].sort((a, b) => b.interest_rate - a.interest_rate);
+    const best = byInterest[0];
+    const worst = byInterest[byInterest.length - 1];
+    const gap = best.interest_rate - worst.interest_rate;
+    if (gap > 0.05) {
+      out.push({
+        tone: 'positive',
+        title: `${best.vendor_name} leads on interest rate`,
+        detail: `${pct(best.interest_rate)} vs ${worst.vendor_name}'s ${pct(worst.interest_rate)} — a ${pct(gap)} gap on ${intf(best.total_calls)}+ calls.`,
+      });
+    }
+
+    // Best on connection rate
+    const byConn = [...active].sort((a, b) => b.connection_rate - a.connection_rate);
+    if (byConn[0].vendor_name !== best.vendor_name) {
+      out.push({
+        tone: 'neutral',
+        title: `Different leaders on connection vs interest`,
+        detail: `${byConn[0].vendor_name} connects more (${pct(byConn[0].connection_rate)}) but ${best.vendor_name} converts better. Volume vs quality trade-off.`,
+      });
+    }
+  }
+
+  // Campaign breakdown insights
+  if (cbreak && cbreak.length >= 3) {
+    const sorted = [...cbreak].sort((a, b) => b.interest_rate - a.interest_rate);
+    const topCamp = sorted[0];
+    if (topCamp.connected_calls >= 20) {
+      out.push({
+        tone: 'positive',
+        title: `Top campaign: ${pct(topCamp.interest_rate)} interest rate`,
+        detail: `${topCamp.display_name || topCamp.campaign_name} — ${intf(topCamp.connected_calls)} connected, ${intf(topCamp.interested_calls)} interested.`,
+      });
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Agent performance
+// ---------------------------------------------------------------------------
+export function agentInsights(perf: AgentPerformanceRow[] | undefined): Insight[] {
+  if (!perf || !perf.length) return [];
+  const out: Insight[] = [];
+
+  const active = perf.filter(a => a.connected_calls >= 30);
+  if (!active.length) {
+    out.push({
+      tone: 'info',
+      title: 'Not enough data for agent comparison yet',
+      detail: 'No agent has 30+ connected calls in this window. Comparisons would be noisy.',
+    });
+    return out;
+  }
+
+  // Top agent by interest rate
+  const byInterest = [...active].sort((a, b) => b.interest_rate - a.interest_rate);
+  const top = byInterest[0];
+  out.push({
+    tone: 'positive',
+    title: `Top performer: ${top.agent_name}`,
+    detail: `${pct(top.interest_rate)} interest rate over ${intf(top.connected_calls)} connected calls. Voice: ${top.voice_persona || '—'}, Lang: ${top.language || '—'}.`,
+  });
+
+  // Connection-vs-interest gap (open well but don't close)
+  const gappers = active
+    .filter(a => a.connection_rate >= 0.4 && a.interest_rate < 0.15)
+    .sort((a, b) => b.total_calls - a.total_calls);
+  if (gappers.length) {
+    const a = gappers[0];
+    out.push({
+      tone: 'warning',
+      title: `${a.agent_name} opens well but doesn't convert`,
+      detail: `Connects at ${pct(a.connection_rate)} but only ${pct(a.interest_rate)} interested. The script gets people on the call — the pitch needs work.`,
+    });
+  }
+
+  // Volume concentration
+  const totalCalls = active.reduce((s, a) => s + a.total_calls, 0);
+  if (totalCalls > 0) {
+    const topShare = top.total_calls / totalCalls;
+    if (topShare > 0.7) {
+      out.push({
+        tone: 'info',
+        title: `${top.agent_name} carries ${pct(topShare, 0)} of volume`,
+        detail: `Most calls ride on a single agent. Test alternates to reduce risk and find better-converting scripts.`,
+      });
+    }
+  }
+
+  // Language pattern
+  const byLang = new Map<string, { calls: number; interested: number }>();
+  for (const a of active) {
+    const lang = a.language || 'Unknown';
+    const cur = byLang.get(lang) || { calls: 0, interested: 0 };
+    cur.calls += a.connected_calls;
+    cur.interested += Math.round(a.connected_calls * a.interest_rate);
+    byLang.set(lang, cur);
+  }
+  if (byLang.size >= 2) {
+    const ranked = [...byLang.entries()]
+      .map(([lang, d]) => ({ lang, rate: d.calls > 0 ? d.interested / d.calls : 0, calls: d.calls }))
+      .filter(x => x.calls >= 30)
+      .sort((a, b) => b.rate - a.rate);
+    if (ranked.length >= 2 && ranked[0].rate - ranked[ranked.length - 1].rate > 0.05) {
+      out.push({
+        tone: 'neutral',
+        title: `${ranked[0].lang} converts better than ${ranked[ranked.length - 1].lang}`,
+        detail: `${pct(ranked[0].rate)} vs ${pct(ranked[ranked.length - 1].rate)} interest rate.`,
+      });
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Call logs (page-level)
+// ---------------------------------------------------------------------------
+export function callsInsights(page: CallListPage | undefined): Insight[] {
+  if (!page || !page.items.length) return [];
+  const out: Insight[] = [];
+  const items = page.items;
+
+  // Pickup distribution
+  const pickup = { HUMAN: 0, MACHINE: 0, UNKNOWN: 0 } as Record<string, number>;
+  for (const c of items) pickup[c.answered_by] = (pickup[c.answered_by] || 0) + 1;
+  const total = items.length;
+  if (total > 0 && pickup.MACHINE > 0) {
+    const machineShare = pickup.MACHINE / total;
+    if (machineShare > 0.15) {
+      out.push({
+        tone: 'warning',
+        title: `${pct(machineShare, 0)} of pickups are voicemail/machines`,
+        detail: `${pickup.MACHINE} of ${total} on this page hit a machine. Adjust dial windows or skip-trace bad numbers.`,
+      });
+    }
+  }
+
+  // Recording coverage
+  const completed = items.filter(c => c.lifecycle_status === 'COMPLETED');
+  if (completed.length >= 5) {
+    const withRec = completed.filter(c => c.has_recording).length;
+    const cov = withRec / completed.length;
+    if (cov < 0.7) {
+      out.push({
+        tone: 'warning',
+        title: `Only ${pct(cov, 0)} of completed calls have recordings`,
+        detail: `${withRec} of ${completed.length} completed calls on this page are recorded. Missing recordings hurt QA.`,
+      });
+    } else if (cov >= 0.95) {
+      out.push({
+        tone: 'positive',
+        title: `Recording coverage is strong (${pct(cov, 0)})`,
+        detail: `${withRec} of ${completed.length} completed calls captured. Good for QA.`,
+      });
+    }
+  }
+
+  // Total dataset size
+  if (page.total > 0) {
+    out.push({
+      tone: 'info',
+      title: `${intf(page.total)} calls match these filters`,
+      detail: page.total > 1000
+        ? 'Large dataset — narrow with date or vendor for faster review.'
+        : `Showing page ${page.page} of ${Math.ceil(page.total / page.page_size)}.`,
+    });
+  }
+
+  return out;
+}
+
+
+// ---------------------------------------------------------------------------
+// Hourly Insights — narrative observations for the /hourly-insights page
+// ---------------------------------------------------------------------------
+function hourLabel(h: number): string {
+  if (h === 0) return '12 AM';
+  if (h === 12) return '12 PM';
+  if (h < 12) return `${h} AM`;
+  return `${h - 12} PM`;
+}
+
+const MIN_N = 30; // minimum sample to call a result "real"
+
+export function hourlyInsights(data: HourlyInsights | undefined): Insight[] {
+  if (!data) return [];
+  const out: Insight[] = [];
+
+  const totalCalls = data.hour_breakdown.reduce((s, h) => s + h.total_calls, 0);
+  if (totalCalls === 0) {
+    out.push({
+      tone: 'neutral',
+      title: 'No calls in this window',
+      detail: 'Adjust the date range or filters to see hourly patterns.',
+    });
+    return out;
+  }
+
+  // 1. Calling-window concentration — flag if 100% of volume is in <=2 hours
+  const sortedByVol = [...data.hour_breakdown].sort((a, b) => b.total_calls - a.total_calls);
+  const top2Share = (sortedByVol.slice(0, 2).reduce((s, h) => s + h.total_calls, 0)) / totalCalls;
+  if (top2Share > 0.9) {
+    const hrs = sortedByVol.slice(0, 2).map(h => hourLabel(h.hour)).join(' & ');
+    out.push({
+      tone: 'warning',
+      title: `${pct(top2Share)} of all calls are in just 2 hours (${hrs})`,
+      detail: 'You\'re almost certainly leaving connections on the table outside this window. Test 1–2 adjacent hours to validate.',
+    });
+  }
+
+  // 2. Best connection hour — only above MIN_N
+  const significantHours = data.hour_breakdown.filter(h => h.total_calls >= MIN_N);
+  if (significantHours.length >= 2) {
+    const sortedConn = [...significantHours].sort((a, b) => b.connection_rate - a.connection_rate);
+    const best = sortedConn[0];
+    const worst = sortedConn[sortedConn.length - 1];
+    const gap = best.connection_rate - worst.connection_rate;
+    if (gap >= 0.05) {
+      out.push({
+        tone: 'positive',
+        title: `${hourLabel(best.hour)} beats ${hourLabel(worst.hour)} by ${pct(gap)} on connection`,
+        detail: `${pct(best.connection_rate)} vs ${pct(worst.connection_rate)} (${intf(best.total_calls)} vs ${intf(worst.total_calls)} calls). Shift volume toward ${hourLabel(best.hour)}.`,
+      });
+    }
+  }
+
+  // 3. Best DOW — must have >=2 days with significant volume
+  const significantDows = data.dow_breakdown.filter(d => d.total_calls >= MIN_N);
+  if (significantDows.length >= 2) {
+    const bestDow = [...significantDows].sort((a, b) => b.connection_rate - a.connection_rate)[0];
+    const worstDow = [...significantDows].sort((a, b) => a.connection_rate - b.connection_rate)[0];
+    if (bestDow.dow !== worstDow.dow && bestDow.connection_rate - worstDow.connection_rate >= 0.05) {
+      out.push({
+        tone: 'positive',
+        title: `${bestDow.dow_name} is your strongest day`,
+        detail: `${pct(bestDow.connection_rate)} connection vs ${pct(worstDow.connection_rate)} on ${worstDow.dow_name}. Skew weekly capacity toward ${bestDow.dow_name}.`,
+      });
+    }
+  }
+
+  // 4. Heatmap sweet spot — single best cell with N >= MIN_N
+  const significantCells = data.heatmap.filter(c => c.total_calls >= MIN_N);
+  if (significantCells.length >= 2) {
+    const bestCell = [...significantCells].sort((a, b) => b.connection_rate - a.connection_rate)[0];
+    out.push({
+      tone: 'info',
+      title: `Sweet spot: ${bestCell.dow_name} ${hourLabel(bestCell.hour)}`,
+      detail: `${pct(bestCell.connection_rate)} connection on ${intf(bestCell.total_calls)} calls — your single highest-converting time slot.`,
+    });
+  }
+
+  // 5. Empty-cell observation — heatmap coverage
+  const totalActiveCells = data.heatmap.length;
+  const totalPossibleCells = 7 * 24;
+  const coverage = totalActiveCells / totalPossibleCells;
+  if (coverage < 0.1) {
+    out.push({
+      tone: 'neutral',
+      title: `You've tested ${totalActiveCells} of 168 possible day×hour slots`,
+      detail: `${pct(coverage)} coverage. The empty cells are unmeasured opportunity — you don\'t actually know what works at 7 PM Saturday because you've never tried.`,
+    });
+  }
+
+  // 6. Interest vs connection mismatch — high pickup hour, low interest hour
+  if (significantHours.length >= 2) {
+    const bestConn = [...significantHours].sort((a, b) => b.connection_rate - a.connection_rate)[0];
+    const bestInt = [...significantHours].sort((a, b) => b.interest_rate - a.interest_rate)[0];
+    if (bestConn.hour !== bestInt.hour) {
+      out.push({
+        tone: 'info',
+        title: `Pickup peak ≠ interest peak`,
+        detail: `${hourLabel(bestConn.hour)} has the highest pickup (${pct(bestConn.connection_rate)}) but ${hourLabel(bestInt.hour)} has the most interested leads per connection (${pct(bestInt.interest_rate)}). Different audiences answer at different times.`,
+      });
+    }
+  }
+
+  return out;
 }
