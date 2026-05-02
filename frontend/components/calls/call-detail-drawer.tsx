@@ -30,10 +30,10 @@ export default function CallDetailDrawer({ callId, onClose }: Props) {
 
       {/* Drawer */}
       <aside className="fixed right-0 top-0 h-screen w-full max-w-2xl bg-surface-50 z-50 shadow-2xl overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-surface-200 px-6 py-4 flex items-center justify-between z-10">
+        <div className="sticky top-0 bg-white border-b border-surface-200 px-4 md:px-6 py-3 md:py-4 flex items-center justify-between z-10">
           <div>
             <div className="text-xs text-surface-500 uppercase tracking-wider">Call detail</div>
-            <h2 className="text-lg font-semibold text-brand-navy">
+            <h2 className="text-base md:text-lg font-semibold text-brand-navy truncate">
               {call?.callee_name || call?.mobile_number || 'Loading…'}
             </h2>
           </div>
@@ -45,7 +45,7 @@ export default function CallDetailDrawer({ callId, onClose }: Props) {
         {isLoading || !call ? (
           <div className="p-12 text-center text-surface-500">Loading…</div>
         ) : (
-          <div className="p-6 space-y-5">
+          <div className="p-4 md:p-6 space-y-4 md:space-y-5">
             {/* Status row */}
             <div className="flex flex-wrap items-center gap-2">
               <StatusBadge status={call.lifecycle_status} />
@@ -77,7 +77,7 @@ export default function CallDetailDrawer({ callId, onClose }: Props) {
             )}
 
             {/* Key facts grid */}
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
               <Fact icon={<Phone size={14} />} label="Mobile">{call.mobile_number || '—'}</Fact>
               <Fact icon={<User size={14} />} label="Vendor">{call.vendor_name}</Fact>
               <Fact icon={<Bot size={14} />} label="Agent">{call.agent_name || '—'}</Fact>
