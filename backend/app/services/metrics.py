@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CallLog, Campaign, Vendor
@@ -76,9 +76,17 @@ def _safe_div(num: float | int | None, den: float | int | None) -> float:
 # Top-level metrics block (the four big tiles on Overview page)
 # ---------------------------------------------------------------------------
 async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> dict[str, Any]:
+    # unique_leads = count of distinct mobile numbers — one person dialed N times = 1 lead.
+    # Empty/NULL numbers excluded so we don't undercount silently.
+    _valid_phone = case(
+        (and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""), CallLog.mobile_number)
+    )
     stmt = select(
         func.count(CallLog.id).label("total_calls"),
+        func.count(distinct(_valid_phone)).label("unique_leads"),
         func.sum(case((_is_connected, 1), else_=0)).label("connected_calls"),
+        func.count(distinct(case((_is_connected, CallLog.mobile_number)))).label("unique_connected_leads"),
+        func.count(distinct(case((and_(_is_connected, _is_interested), CallLog.mobile_number)))).label("unique_interested_leads"),
         func.sum(case((CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")), 1), else_=0)).label("failed_calls"),
         func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_duration_sec"),
         func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged_calls"),
@@ -89,6 +97,9 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     row = (await db.execute(stmt)).one()
 
     total = int(row.total_calls or 0)
+    unique_leads = int(row.unique_leads or 0)
+    unique_connected = int(row.unique_connected_leads or 0)
+    unique_interested = int(row.unique_interested_leads or 0)
     connected = int(row.connected_calls or 0)
     failed = int(row.failed_calls or 0)
     engaged = int(row.engaged_calls or 0)
@@ -97,17 +108,24 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
 
     return {
         "total_calls": total,
+        "unique_leads": unique_leads,
+        "unique_connected_leads": unique_connected,
+        "unique_interested_leads": unique_interested,
         "connected_calls": connected,
         "failed_calls": failed,
         "avg_duration_seconds": float(row.avg_duration_sec or 0),
         "engaged_calls": engaged,
         "interested_calls": interested,
         "follow_up_calls": follow_up,
+        # NOTE on rates — kept call-based to preserve historical comparisons.
+        # Lead-based variants below are additive; consumers can pick either.
         "connection_rate": _safe_div(connected, total),
         "engagement_rate": _safe_div(engaged, connected),
         "interest_rate": _safe_div(interested, connected),
         "follow_up_rate": _safe_div(follow_up, connected),
         "conversion_rate": _safe_div(interested, total),  # v1 proxy; wire real conversions in v2
+        "lead_conversion_rate": _safe_div(unique_interested, unique_leads),
+        "attempts_per_lead": (total / unique_leads) if unique_leads else 0.0,
     }
 
 
@@ -157,12 +175,16 @@ async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str
 # Vendor comparison — same metrics, broken down per vendor
 # ---------------------------------------------------------------------------
 async def vendor_comparison(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
+    _valid_phone_vc = case(
+        (and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""), CallLog.mobile_number)
+    )
     stmt = (
         select(
             Vendor.id.label("vendor_id"),
             Vendor.slug.label("vendor_slug"),
             Vendor.name.label("vendor_name"),
             func.count(CallLog.id).label("total"),
+            func.count(distinct(_valid_phone_vc)).label("unique_leads"),
             func.sum(case((_is_connected, 1), else_=0)).label("connected"),
             func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
             func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
@@ -178,17 +200,20 @@ async def vendor_comparison(db: AsyncSession, filters: MetricFilters) -> list[di
     for r in rows:
         total = int(r.total or 0)
         connected = int(r.connected or 0)
+        unique_leads = int(r.unique_leads or 0)
         out.append({
             "vendor_id": str(r.vendor_id),
             "vendor_slug": r.vendor_slug,
             "vendor_name": r.vendor_name,
             "total_calls": total,
+            "unique_leads": unique_leads,
             "connected_calls": connected,
             "avg_duration_seconds": float(r.avg_dur or 0),
             "connection_rate": _safe_div(connected, total),
             "engagement_rate": _safe_div(int(r.engaged or 0), connected),
             "interest_rate": _safe_div(int(r.interested or 0), connected),
             "follow_up_rate": _safe_div(int(r.follow_up or 0), connected),
+            "attempts_per_lead": (total / unique_leads) if unique_leads else 0.0,
         })
     return out
 
