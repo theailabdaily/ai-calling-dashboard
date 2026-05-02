@@ -17,7 +17,7 @@ from app.adapters import get_adapter
 from app.config import get_settings
 from app.database import get_db
 from app.models import Lead
-from app.schemas import TriggerCampaignRequest, TriggerCampaignResponse
+from app.schemas import PushRecipientsRequest, TriggerCampaignRequest, TriggerCampaignResponse
 from app.services.sheets import import_sheet
 from app.services.upsert import ensure_campaign, get_vendor_by_slug, upsert_call
 
@@ -151,6 +151,53 @@ async def push_leads_to_vendor(req: TriggerCampaignRequest, db: AsyncSession = D
         status="launched",
         request_id=request_id,
         sheet_rows_inserted=sheet_result["rows_inserted"],
+        recipients_pushed=len(recipients),
+        vendor_response=vendor_response if isinstance(vendor_response, dict) else {"raw": str(vendor_response)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Push pre-parsed recipients (from CSV upload) directly to a vendor.
+# Used by the dashboard's Launch Campaign page when the user uploads a CSV
+# instead of pointing at a Google Sheet.
+# ---------------------------------------------------------------------------
+@router.post("/ingest/push-recipients", response_model=TriggerCampaignResponse)
+async def push_recipients_to_vendor(req: PushRecipientsRequest, db: AsyncSession = Depends(get_db)):
+    settings = get_settings()
+    vendor = await get_vendor_by_slug(db, req.vendor_slug)
+    if not vendor:
+        raise HTTPException(status_code=404, detail=f"Vendor '{req.vendor_slug}' not found")
+    if not req.recipients:
+        raise HTTPException(status_code=400, detail="At least one recipient is required")
+
+    recipients = [r.model_dump() for r in req.recipients]
+    adapter = get_adapter(req.vendor_slug)
+    request_id = f"campaign_{uuid.uuid4().hex[:16]}"
+
+    try:
+        vendor_response = await adapter.create_bulk_calls(
+            agent_id=req.vendor_agent_id,
+            recipients=recipients,
+            request_id=request_id,
+            callback_base_url=settings.public_webhook_base_url,
+        )
+    except Exception as e:
+        logger.exception("vendor bulk_calls failed")
+        raise HTTPException(status_code=502, detail=f"Vendor rejected the request: {e}")
+
+    await ensure_campaign(
+        db,
+        vendor_id=vendor.id,
+        vendor_request_id=request_id,
+        name=req.campaign_name or f"CSV upload {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        started_at=datetime.now(timezone.utc),
+    )
+    await db.commit()
+
+    return TriggerCampaignResponse(
+        status="launched",
+        request_id=request_id,
+        sheet_rows_inserted=0,
         recipients_pushed=len(recipients),
         vendor_response=vendor_response if isinstance(vendor_response, dict) else {"raw": str(vendor_response)},
     )
