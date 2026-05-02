@@ -700,44 +700,87 @@ async def outcome_distribution(db: AsyncSession, filters: MetricFilters) -> dict
 # max_retries config matches expectation.
 # ---------------------------------------------------------------------------
 async def attempts_distribution(db: AsyncSession, filters: MetricFilters) -> dict[str, Any]:
+    """
+    True dial frequency per lead. Uses Hunar's `retry_count` (= retries used)
+    on each call_log row. Total attempts on a row = retry_count + 1 (one
+    initial dial + N retries). Sum across rows for the same mobile_number =
+    total times that lead has been dialed.
+
+    Edge case: a SCHEDULED row with retry_count=0 and started_at=NULL means
+    the lead is queued but Hunar hasn't even started dialing yet → 0 attempts.
+
+    Per bucket we also report:
+      - leads:        unique leads with that exact attempt count
+      - connected:    leads in this bucket who picked up (HUMAN, COMPLETED) at
+                      least once across all their call_log rows
+      - connect_rate: connected / leads (the cohort's pickup rate)
+
+    Why this matters: when retry budget is wasted on dead leads, those leads
+    pile up in the high-attempt buckets with near-zero connect_rate. Easy
+    visual signal for "stop retrying after N attempts".
+    """
     valid_phone = and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != "")
 
-    # Inner: attempts per unique mobile_number, post-filter
+    # Per-row attempts: retry_count + 1, except truly never-dialed = 0
+    attempts_per_row = case(
+        (and_(
+            CallLog.status == "SCHEDULED",
+            CallLog.retry_count == 0,
+            CallLog.started_at.is_(None),
+        ), literal(0)),
+        else_=CallLog.retry_count + literal(1),
+    )
+
+    # Per-row "did this row connect (human pickup)?"
+    connected_per_row = case(
+        (and_(
+            CallLog.lifecycle_status == "COMPLETED",
+            CallLog.answered_by == "HUMAN",
+        ), literal(1)),
+        else_=literal(0),
+    )
+
+    # Inner: per-lead total attempts + ever_connected flag (max=1 if any row connected)
     inner = select(
         CallLog.mobile_number.label("mobile"),
-        func.count().label("attempts"),
+        func.sum(attempts_per_row).label("attempts"),
+        func.max(connected_per_row).label("ever_connected"),
     ).where(valid_phone).group_by(CallLog.mobile_number)
     inner = filters.apply(inner).subquery()
 
-    # Outer: histogram across attempt-counts
+    # Outer: histogram by total attempts, with connect counts
     outer = (
-        select(inner.c.attempts.label("attempts"), func.count().label("leads"))
+        select(
+            inner.c.attempts.label("attempts"),
+            func.count().label("leads"),
+            func.coalesce(func.sum(inner.c.ever_connected), literal(0)).label("connected"),
+        )
         .group_by(inner.c.attempts)
         .order_by(inner.c.attempts.asc())
     )
     rows = (await db.execute(outer)).all()
 
     total_leads = sum(int(r.leads) for r in rows) or 0
+    total_connected = sum(int(r.connected or 0) for r in rows) or 0
     total_calls = sum(int(r.attempts) * int(r.leads) for r in rows) or 0
-    # Avoid div-by-zero in pct math while keeping totals honest
     leads_div = total_leads or 1
-    calls_div = total_calls or 1
 
     out_rows: list[dict[str, Any]] = []
     for r in rows:
         attempts = int(r.attempts)
         leads = int(r.leads)
-        calls_consumed = attempts * leads
+        connected = int(r.connected or 0)
         out_rows.append({
             "attempts": attempts,
             "leads": leads,
-            "calls_consumed": calls_consumed,
+            "connected": connected,
             "pct_of_leads": leads / leads_div,
-            "pct_of_calls": calls_consumed / calls_div,
+            "connect_rate": (connected / leads) if leads else 0.0,
         })
 
     return {
         "rows": out_rows,
         "total_leads": total_leads,
+        "total_connected": total_connected,
         "total_calls": total_calls,
     }
