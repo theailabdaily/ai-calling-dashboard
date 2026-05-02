@@ -6,6 +6,7 @@ import MetricCard from '@/components/ui/metric-card';
 import CallsOverTime from '@/components/charts/calls-over-time';
 import FunnelChart, { FunnelStageKey } from '@/components/charts/funnel';
 import VendorBars from '@/components/charts/vendor-bars';
+import HourlyAnalytics from '@/components/charts/hourly-analytics';
 import InsightsPanel from '@/components/ui/insights-panel';
 import FunnelStageDrawer from '@/components/calls/funnel-stage-drawer';
 import CallDetailDrawer from '@/components/calls/call-detail-drawer';
@@ -20,6 +21,17 @@ const initialFilters: Filters = {
   campaign_ids: [],
 };
 
+// Build a /calls deep-link that carries the current date window so the linked
+// page opens with the same range applied.
+function buildCallsLink(filters: Filters, params: Record<string, string>): string {
+  const q = new URLSearchParams({
+    start: filters.start.toISOString(),
+    end: filters.end.toISOString(),
+    ...params,
+  });
+  return `/calls?${q.toString()}`;
+}
+
 export default function OverviewPage() {
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [stage, setStage] = useState<{ key: FunnelStageKey; label: string } | null>(null);
@@ -29,6 +41,7 @@ export default function OverviewPage() {
   const series  = useQuery({ queryKey: ['series', filters],  queryFn: () => api.timeSeries(filters) });
   const funnel  = useQuery({ queryKey: ['funnel', filters],  queryFn: () => api.funnel(filters) });
   const vcomp   = useQuery({ queryKey: ['vcomp', filters],   queryFn: () => api.vendorComparison(filters) });
+  const hourly  = useQuery({ queryKey: ['hourly', filters],  queryFn: () => api.hourly(filters) });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
   const insights = overviewInsights(metrics.data, funnel.data, vcomp.data, series.data);
@@ -73,7 +86,12 @@ export default function OverviewPage() {
         <MetricCard label="Engagement rate" value={metrics.data ? fmt.pct(metrics.data.engagement_rate) : '—'} />
         <MetricCard label="Interest rate"   value={metrics.data ? fmt.pct(metrics.data.interest_rate) : '—'} />
         <MetricCard label="Follow-up rate"  value={metrics.data ? fmt.pct(metrics.data.follow_up_rate) : '—'} />
-        <MetricCard label="Failed calls"    value={metrics.data ? fmt.int(metrics.data.failed_calls) : '—'} />
+        <MetricCard
+          label="Failed calls"
+          value={metrics.data ? fmt.int(metrics.data.failed_calls) : '—'}
+          hint="Click to inspect"
+          href={buildCallsLink(filters, { failed_only: 'true' })}
+        />
       </div>
 
       {/* Charts grid */}
@@ -86,6 +104,9 @@ export default function OverviewPage() {
           onStageClick={(key, label) => setStage({ key, label })}
         />
       </div>
+
+      {/* Hourly performance — when do customers pick up + convert */}
+      <HourlyAnalytics data={hourly.data || []} />
 
       <InsightsPanel
         insights={insights}
