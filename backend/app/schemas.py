@@ -68,6 +68,18 @@ class TimeBucket(BaseModel):
     interested: int
 
 
+class HourBucket(BaseModel):
+    hour: int
+    total_calls: int
+    connected_calls: int
+    engaged_calls: int
+    interested_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+
+
 class FunnelStage(BaseModel):
     stage: str
     count: int
