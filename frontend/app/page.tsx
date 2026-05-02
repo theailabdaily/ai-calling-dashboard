@@ -59,18 +59,18 @@ export default function OverviewPage() {
   const insights = overviewInsights(metrics.data, funnel.data, vcomp.data, series.data);
 
   return (
-    <div className="p-6 space-y-5 max-w-[1400px]">
+    <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
       <header>
-        <h1 className="text-2xl font-semibold text-brand-navy">Overview</h1>
-        <p className="text-sm text-surface-500 mt-1">
-          Unified analytics across all AI calling vendors. Hover any (i) for definitions.
+        <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">Overview</h1>
+        <p className="text-xs md:text-sm text-surface-500 mt-1">
+          Unified analytics across all AI calling vendors. Tap any (i) for definitions.
         </p>
       </header>
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
 
       {/* Row 1 — Unique leads first (the honest reach number), then call-attempt funnel */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4">
         <MetricCard
           label="Unique leads"
           value={metrics.data ? fmt.int(metrics.data.unique_leads ?? 0) : '—'}
@@ -106,7 +106,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Row 2 — quality + ops metrics */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
         <MetricCard
           label="Avg. duration"
           value={metrics.data ? fmt.duration(metrics.data.avg_duration_seconds) : '—'}
@@ -133,7 +133,7 @@ export default function OverviewPage() {
       </div>
 
       {/* Charts grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 md:gap-4">
         <div className="lg:col-span-2">
           <CallsOverTime data={series.data || []} />
         </div>
