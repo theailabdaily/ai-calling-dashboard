@@ -16,15 +16,15 @@ import { ExternalLink, Info, ArrowRight, Database, Activity } from 'lucide-react
 
 export default function LaunchCampaignPage() {
   return (
-    <div className="p-6 max-w-3xl space-y-5">
+    <div className="p-4 md:p-6 max-w-3xl mx-auto space-y-4 md:space-y-5">
       <header>
-        <h1 className="text-2xl font-semibold text-brand-navy">Launch campaign</h1>
-        <p className="text-sm text-surface-500 mt-1">
+        <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">Launch campaign</h1>
+        <p className="text-xs md:text-sm text-surface-500 mt-1">
           Campaigns are managed in your vendor's dashboard. This view is now read-only.
         </p>
       </header>
 
-      <div className="card border-brand-pink/30 bg-gradient-to-br from-white to-brand-pink/5 p-6">
+      <div className="card border-brand-pink/30 bg-gradient-to-br from-white to-brand-pink/5 p-4 md:p-6">
         <div className="flex gap-3">
           <Info size={20} className="text-brand-pink shrink-0 mt-0.5" />
           <div className="space-y-3 flex-1">
@@ -75,7 +75,7 @@ export default function LaunchCampaignPage() {
         </div>
       </div>
 
-      <div className="card p-6 space-y-3">
+      <div className="card p-4 md:p-6 space-y-3">
         <div className="flex items-center gap-2">
           <Database size={16} className="text-surface-500" />
           <h3 className="text-sm font-semibold text-brand-navy">How sync works</h3>
@@ -88,7 +88,7 @@ export default function LaunchCampaignPage() {
         </ol>
       </div>
 
-      <div className="flex items-center gap-3 pt-2">
+      <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 pt-2">
         <Link href="/" className="btn bg-brand-pink text-white hover:bg-brand-pink/90">
           Back to overview <ArrowRight size={14} />
         </Link>
