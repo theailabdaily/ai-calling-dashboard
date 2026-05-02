@@ -248,25 +248,23 @@ export default function LaunchCampaignPage() {
         <div className="space-y-4">
           {/* Drop zone */}
           {!csvFile ? (
-            <div
+            <label
               onDrop={onDrop}
               onDragOver={e => e.preventDefault()}
-              className="card border-2 border-dashed border-surface-300 p-12 text-center hover:border-brand-pink/50 transition-colors"
+              className="card border-2 border-dashed border-surface-300 p-12 text-center hover:border-brand-pink/50 transition-colors cursor-pointer block"
             >
               <Upload size={32} className="mx-auto mb-3 text-surface-400" />
-              <label className="cursor-pointer">
-                <span className="text-sm font-medium text-brand-navy">Drop a CSV here, or click to upload</span>
-                <input
-                  type="file"
-                  accept=".csv,text/csv"
-                  className="hidden"
-                  onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])}
-                />
-              </label>
+              <div className="text-sm font-medium text-brand-navy">Drop a CSV here, or click to upload</div>
               <p className="text-xs text-surface-500 mt-2">
                 Headers required. We'll let you map columns next. CSV ≤ 20 MB.
               </p>
-            </div>
+              <input
+                type="file"
+                accept=".csv,text/csv"
+                className="hidden"
+                onChange={e => e.target.files?.[0] && handleFile(e.target.files[0])}
+              />
+            </label>
           ) : (
             <div className="card p-4 flex items-center gap-3">
               <FileText size={18} className="text-brand-pink shrink-0" />
