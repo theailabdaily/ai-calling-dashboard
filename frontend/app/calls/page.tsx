@@ -1,7 +1,8 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { Search, Volume2, ChevronLeft, ChevronRight, Star } from 'lucide-react';
-import { useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Search, Volume2, ChevronLeft, ChevronRight, Star, AlertCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 
 import FilterBar from '@/components/filters/filter-bar';
@@ -12,21 +13,50 @@ import { api, fmt } from '@/lib/api';
 import { callsInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
 
-const initialFilters: Filters = {
-  start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-  end: new Date(),
-  vendor_ids: [],
-  campaign_ids: [],
-};
+function defaultFilters(): Filters {
+  return {
+    start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+    end: new Date(),
+    vendor_ids: [],
+    campaign_ids: [],
+  };
+}
+
+// Parse Filters from URL search params if present
+function filtersFromUrl(sp: URLSearchParams): Filters {
+  const base = defaultFilters();
+  const startStr = sp.get('start');
+  const endStr = sp.get('end');
+  if (startStr) {
+    const d = new Date(startStr);
+    if (!isNaN(d.getTime())) base.start = d;
+  }
+  if (endStr) {
+    const d = new Date(endStr);
+    if (!isNaN(d.getTime())) base.end = d;
+  }
+  return base;
+}
 
 export default function CallsPage() {
-  const [filters, setFilters] = useState<Filters>(initialFilters);
+  const searchParams = useSearchParams();
+
+  const [filters, setFilters] = useState<Filters>(() => filtersFromUrl(new URLSearchParams(searchParams.toString())));
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [onlyRecording, setOnlyRecording] = useState(false);
-  const [onlyInterested, setOnlyInterested] = useState(false);
+  const [onlyInterested, setOnlyInterested] = useState(searchParams.get('only_interested') === 'true');
+  const [failedOnly, setFailedOnly] = useState(searchParams.get('failed_only') === 'true');
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
+
+  // If URL params change (e.g. user follows another deep link), pick them up
+  useEffect(() => {
+    setOnlyInterested(searchParams.get('only_interested') === 'true');
+    setFailedOnly(searchParams.get('failed_only') === 'true');
+    setFilters(filtersFromUrl(new URLSearchParams(searchParams.toString())));
+    setPage(1);
+  }, [searchParams]);
 
   // Debounce search
   if (search !== debouncedSearch) {
@@ -34,7 +64,7 @@ export default function CallsPage() {
   }
 
   const calls = useQuery({
-    queryKey: ['calls', filters, debouncedSearch, page, onlyRecording, onlyInterested],
+    queryKey: ['calls', filters, debouncedSearch, page, onlyRecording, onlyInterested, failedOnly],
     queryFn: () => api.callsList({
       f: filters,
       page,
@@ -42,6 +72,7 @@ export default function CallsPage() {
       search: debouncedSearch || undefined,
       only_with_recording: onlyRecording,
       only_interested: onlyInterested,
+      failed_only: failedOnly,
     }),
   });
 
@@ -49,6 +80,12 @@ export default function CallsPage() {
   const insights = callsInsights(calls.data);
 
   const totalPages = calls.data ? Math.max(1, Math.ceil(calls.data.total / calls.data.page_size)) : 1;
+
+  // Banner shown when user lands here via a deep link with active filters
+  const activeDeepFilter =
+    failedOnly ? { label: 'Failed calls only', clear: () => setFailedOnly(false) } :
+    onlyInterested ? { label: 'Interested calls only', clear: () => setOnlyInterested(false) } :
+    null;
 
   return (
     <div className="p-6 space-y-5 max-w-[1400px]">
@@ -58,6 +95,21 @@ export default function CallsPage() {
           QA the AI agent. Search by phone or name, filter by outcome, click any row to listen.
         </p>
       </header>
+
+      {activeDeepFilter && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 flex items-center gap-2 text-sm">
+          <AlertCircle size={14} className="text-amber-600 shrink-0" />
+          <span className="text-amber-900 flex-1">
+            Filtered to: <strong>{activeDeepFilter.label}</strong>
+          </span>
+          <button
+            onClick={activeDeepFilter.clear}
+            className="text-xs text-amber-700 hover:text-amber-900 font-medium underline"
+          >
+            Clear filter
+          </button>
+        </div>
+      )}
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
 
@@ -87,6 +139,12 @@ export default function CallsPage() {
           className={onlyInterested ? 'btn bg-brand-pink text-white' : 'btn-outline'}
         >
           <Star size={14} /> Interested only
+        </button>
+        <button
+          onClick={() => { setFailedOnly(v => !v); setPage(1); }}
+          className={failedOnly ? 'btn bg-amber-600 text-white' : 'btn-outline'}
+        >
+          <AlertCircle size={14} /> Failed only
         </button>
 
         <span className="text-xs text-surface-500 ml-auto">
@@ -148,7 +206,7 @@ export default function CallsPage() {
               ))}
               {!calls.data?.items.length && !calls.isLoading && (
                 <tr><td colSpan={8} className="text-center py-12 text-surface-500 text-sm">
-                  No calls match these filters. Try widening the date range or running a sync.
+                  No calls match these filters. Try widening the date range or clearing filters.
                 </td></tr>
               )}
             </tbody>
