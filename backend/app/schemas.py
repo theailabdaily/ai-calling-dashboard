@@ -275,3 +275,14 @@ class PushRecipientsRequest(BaseModel):
     vendor_agent_id: str
     campaign_name: str | None = None
     recipients: list[PushRecipient]
+
+
+class OutcomeRow(BaseModel):
+    outcome: str
+    count: int
+    pct: float
+
+
+class OutcomeDistribution(BaseModel):
+    by_call: list[OutcomeRow]
+    by_lead: list[OutcomeRow]
