@@ -1,6 +1,7 @@
 import type {
   Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
-  FunnelStage, HourBucket, HourlyInsights, OutcomeDistribution, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
+  FunnelStage, HourBucket, HourlyInsights, LedgerEntry, LedgerEntryInput, LedgerEntryType, LedgerListResponse,
+  OutcomeDistribution, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
   Vendor, VendorRow,
 } from '@/types';
 
@@ -122,6 +123,55 @@ export const api = {
     }).then(async r => {
       if (!r.ok) throw new Error(await r.text());
       return r.json() as Promise<TriggerCampaignResponse>;
+    }),
+
+  // Activity log / ledger
+  ledgerList: (params: {
+    entry_type?: LedgerEntryType;
+    vendor_id?: string;
+    campaign_id?: string;
+    start?: string;
+    end?: string;
+    search?: string;
+    page?: number;
+    page_size?: number;
+  } = {}): Promise<LedgerListResponse> => {
+    const q = new URLSearchParams();
+    if (params.entry_type) q.set('entry_type', params.entry_type);
+    if (params.vendor_id) q.set('vendor_id', params.vendor_id);
+    if (params.campaign_id) q.set('campaign_id', params.campaign_id);
+    if (params.start) q.set('start', params.start);
+    if (params.end) q.set('end', params.end);
+    if (params.search) q.set('search', params.search);
+    if (params.page) q.set('page', String(params.page));
+    if (params.page_size) q.set('page_size', String(params.page_size));
+    const qs = q.toString();
+    return jget<LedgerListResponse>(`/api/ledger${qs ? `?${qs}` : ''}`);
+  },
+
+  ledgerCreate: (body: LedgerEntryInput): Promise<LedgerEntry> =>
+    fetch(`${API_BASE}/api/ledger`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+      return r.json() as Promise<LedgerEntry>;
+    }),
+
+  ledgerUpdate: (id: string, body: Partial<LedgerEntryInput>): Promise<LedgerEntry> =>
+    fetch(`${API_BASE}/api/ledger/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+      return r.json() as Promise<LedgerEntry>;
+    }),
+
+  ledgerDelete: (id: string): Promise<void> =>
+    fetch(`${API_BASE}/api/ledger/${id}`, { method: 'DELETE' }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
     }),
 };
 
