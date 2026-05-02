@@ -690,3 +690,54 @@ async def outcome_distribution(db: AsyncSession, filters: MetricFilters) -> dict
     ]
 
     return {"by_call": by_call, "by_lead": by_lead}
+
+
+# ---------------------------------------------------------------------------
+# Dial frequency / retry distribution — for each "N attempts", how many unique
+# leads got exactly that many. Sum of leads here = unique_leads on Overview.
+# Useful for spotting retry waste (e.g. 100 leads got 5+ attempts each = 500
+# dial slots burned chasing the same numbers) and for verifying that vendor
+# max_retries config matches expectation.
+# ---------------------------------------------------------------------------
+async def attempts_distribution(db: AsyncSession, filters: MetricFilters) -> dict[str, Any]:
+    valid_phone = and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != "")
+
+    # Inner: attempts per unique mobile_number, post-filter
+    inner = select(
+        CallLog.mobile_number.label("mobile"),
+        func.count().label("attempts"),
+    ).where(valid_phone).group_by(CallLog.mobile_number)
+    inner = filters.apply(inner).subquery()
+
+    # Outer: histogram across attempt-counts
+    outer = (
+        select(inner.c.attempts.label("attempts"), func.count().label("leads"))
+        .group_by(inner.c.attempts)
+        .order_by(inner.c.attempts.asc())
+    )
+    rows = (await db.execute(outer)).all()
+
+    total_leads = sum(int(r.leads) for r in rows) or 0
+    total_calls = sum(int(r.attempts) * int(r.leads) for r in rows) or 0
+    # Avoid div-by-zero in pct math while keeping totals honest
+    leads_div = total_leads or 1
+    calls_div = total_calls or 1
+
+    out_rows: list[dict[str, Any]] = []
+    for r in rows:
+        attempts = int(r.attempts)
+        leads = int(r.leads)
+        calls_consumed = attempts * leads
+        out_rows.append({
+            "attempts": attempts,
+            "leads": leads,
+            "calls_consumed": calls_consumed,
+            "pct_of_leads": leads / leads_div,
+            "pct_of_calls": calls_consumed / calls_div,
+        })
+
+    return {
+        "rows": out_rows,
+        "total_leads": total_leads,
+        "total_calls": total_calls,
+    }
