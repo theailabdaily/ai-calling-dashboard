@@ -7,6 +7,7 @@ import CallsOverTime from '@/components/charts/calls-over-time';
 import FunnelChart, { FunnelStageKey } from '@/components/charts/funnel';
 import VendorBars from '@/components/charts/vendor-bars';
 import OutcomeDistribution from '@/components/charts/outcome-distribution';
+import AttemptsDistribution from '@/components/charts/attempts-distribution';
 import InsightsPanel from '@/components/ui/insights-panel';
 import FunnelStageDrawer from '@/components/calls/funnel-stage-drawer';
 import CallDetailDrawer from '@/components/calls/call-detail-drawer';
@@ -54,6 +55,7 @@ export default function OverviewPage() {
   const funnel  = useQuery({ queryKey: ['funnel', filters],  queryFn: () => api.funnel(filters) });
   const vcomp   = useQuery({ queryKey: ['vcomp', filters],   queryFn: () => api.vendorComparison(filters) });
   const outcomes = useQuery({ queryKey: ['outcomes', filters], queryFn: () => api.outcomes(filters) });
+  const attempts = useQuery({ queryKey: ['attempts', filters], queryFn: () => api.attemptsDistribution(filters) });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
   const insights = overviewInsights(metrics.data, funnel.data, vcomp.data, series.data);
@@ -144,6 +146,8 @@ export default function OverviewPage() {
       </div>
 
       <OutcomeDistribution data={outcomes.data} isLoading={outcomes.isLoading} />
+
+      <AttemptsDistribution data={attempts.data} isLoading={attempts.isLoading} />
 
       <InsightsPanel
         insights={insights}
