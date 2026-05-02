@@ -31,6 +31,7 @@ async def list_calls(
     answered_by: str | None = Query(None),
     only_with_recording: bool = Query(False),
     only_interested: bool = Query(False),
+    failed_only: bool = Query(False),
     funnel_stage: str | None = Query(None, description="connected | engaged | interested | followup"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -59,6 +60,8 @@ async def list_calls(
         extra.append(CallLog.recording_url.isnot(None))
     if only_interested:
         extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
+    if failed_only:
+        extra.append(CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")))
 
     # Funnel stage filter — for the "click on funnel stage" drill-down
     if funnel_stage:
