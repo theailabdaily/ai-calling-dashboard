@@ -5,6 +5,12 @@
 @layer base {
   html, body { @apply bg-surface-50 text-surface-900; }
   body { font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11'; }
+
+  /* Prevent iOS Safari from auto-zooming when a user taps an input < 16px.
+     16px is the iOS threshold — anything smaller triggers zoom-in. */
+  @media (max-width: 1023px) {
+    input, select, textarea { font-size: 16px !important; }
+  }
 }
 
 @layer components {
@@ -14,4 +20,10 @@
   .btn-ghost { @apply btn text-surface-700 hover:bg-surface-100; }
   .btn-outline { @apply btn border border-surface-300 bg-white hover:bg-surface-50; }
   .pill { @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium; }
+}
+
+@layer utilities {
+  /* Hide scrollbar but keep scroll behavior — for horizontal chip rows */
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 }
