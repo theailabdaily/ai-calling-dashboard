@@ -287,6 +287,261 @@ def default_window() -> tuple[datetime, datetime]:
 
 
 # ---------------------------------------------------------------------------
+# Hourly Insights — full payload for the /hourly-insights page
+# Returns: hour rollup, dow rollup, dow×hour heatmap matrix,
+#          per-vendor hour split, per-campaign hour split
+# Single endpoint, single fetch — frontend slices it.
+# ---------------------------------------------------------------------------
+_DOW_NAMES = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
+
+
+def _hour_expr_ist():
+    return func.date_part("hour", func.timezone("Asia/Kolkata", CallLog.vendor_created_at))
+
+
+def _dow_expr_ist():
+    # ISODOW: 1=Mon ... 7=Sun -- intuitive sort order
+    return func.extract("isodow", func.timezone("Asia/Kolkata", CallLog.vendor_created_at))
+
+
+def _bucket_row_to_dict(r, key: str) -> dict[str, Any]:
+    """Shared shape: hour OR dow bucket → metric dict."""
+    total = int(r.total or 0)
+    connected = int(r.connected or 0)
+    engaged = int(r.engaged or 0)
+    interested = int(r.interested or 0)
+    out = {
+        "total_calls": total,
+        "connected_calls": connected,
+        "engaged_calls": engaged,
+        "interested_calls": interested,
+        "avg_duration_seconds": float(r.avg_dur or 0),
+        "connection_rate": _safe_div(connected, total),
+        "engagement_rate": _safe_div(engaged, connected),
+        "interest_rate": _safe_div(interested, connected),
+    }
+    if key == "hour":
+        out["hour"] = int(r.hour)
+    else:
+        dow = int(r.dow)
+        out["dow"] = dow
+        out["dow_name"] = _DOW_NAMES.get(dow, str(dow))
+    return out
+
+
+async def _hour_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
+    h = _hour_expr_ist()
+    stmt = (
+        select(
+            h.label("hour"),
+            func.count(CallLog.id).label("total"),
+            func.sum(case((_is_connected, 1), else_=0)).label("connected"),
+            func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
+            func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
+            func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+        )
+        .group_by(h)
+        .order_by(h)
+    )
+    stmt = filters.apply(stmt)
+    rows = (await db.execute(stmt)).all()
+    return [_bucket_row_to_dict(r, "hour") for r in rows]
+
+
+async def _dow_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
+    d = _dow_expr_ist()
+    stmt = (
+        select(
+            d.label("dow"),
+            func.count(CallLog.id).label("total"),
+            func.sum(case((_is_connected, 1), else_=0)).label("connected"),
+            func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
+            func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
+            func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+        )
+        .group_by(d)
+        .order_by(d)
+    )
+    stmt = filters.apply(stmt)
+    rows = (await db.execute(stmt)).all()
+    return [_bucket_row_to_dict(r, "dow") for r in rows]
+
+
+async def _dow_hour_heatmap(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
+    h = _hour_expr_ist()
+    d = _dow_expr_ist()
+    stmt = (
+        select(
+            d.label("dow"),
+            h.label("hour"),
+            func.count(CallLog.id).label("total"),
+            func.sum(case((_is_connected, 1), else_=0)).label("connected"),
+            func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
+            func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
+            func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+        )
+        .group_by(d, h)
+        .order_by(d, h)
+    )
+    stmt = filters.apply(stmt)
+    rows = (await db.execute(stmt)).all()
+    out = []
+    for r in rows:
+        total = int(r.total or 0)
+        connected = int(r.connected or 0)
+        engaged = int(r.engaged or 0)
+        interested = int(r.interested or 0)
+        dow = int(r.dow)
+        out.append({
+            "dow": dow,
+            "dow_name": _DOW_NAMES.get(dow, str(dow)),
+            "hour": int(r.hour),
+            "total_calls": total,
+            "connected_calls": connected,
+            "engaged_calls": engaged,
+            "interested_calls": interested,
+            "avg_duration_seconds": float(r.avg_dur or 0),
+            "connection_rate": _safe_div(connected, total),
+            "engagement_rate": _safe_div(engaged, connected),
+            "interest_rate": _safe_div(interested, connected),
+        })
+    return out
+
+
+async def _hour_by_vendor(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
+    h = _hour_expr_ist()
+    stmt = (
+        select(
+            Vendor.id.label("vendor_id"),
+            Vendor.name.label("vendor_name"),
+            h.label("hour"),
+            func.count(CallLog.id).label("total"),
+            func.sum(case((_is_connected, 1), else_=0)).label("connected"),
+            func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
+            func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
+            func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+        )
+        .join(CallLog, CallLog.vendor_id == Vendor.id)
+        .group_by(Vendor.id, Vendor.name, h)
+        .order_by(Vendor.name, h)
+    )
+    stmt = filters.apply(stmt)
+    rows = (await db.execute(stmt)).all()
+
+    # Group rows by vendor
+    by_v: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        vid = str(r.vendor_id)
+        if vid not in by_v:
+            by_v[vid] = {"vendor_id": vid, "vendor_name": r.vendor_name, "hours": []}
+        total = int(r.total or 0)
+        connected = int(r.connected or 0)
+        engaged = int(r.engaged or 0)
+        interested = int(r.interested or 0)
+        by_v[vid]["hours"].append({
+            "hour": int(r.hour),
+            "total_calls": total,
+            "connected_calls": connected,
+            "engaged_calls": engaged,
+            "interested_calls": interested,
+            "avg_duration_seconds": float(r.avg_dur or 0),
+            "connection_rate": _safe_div(connected, total),
+            "engagement_rate": _safe_div(engaged, connected),
+            "interest_rate": _safe_div(interested, connected),
+        })
+    return list(by_v.values())
+
+
+async def _hour_by_campaign(db: AsyncSession, filters: MetricFilters, top_n: int = 6) -> list[dict[str, Any]]:
+    """Top N campaigns by volume in window, each with hourly breakdown."""
+    # Identify top campaigns first
+    top_stmt = (
+        select(Campaign.id, func.count(CallLog.id).label("n"))
+        .join(CallLog, CallLog.campaign_id == Campaign.id)
+        .group_by(Campaign.id)
+        .order_by(func.count(CallLog.id).desc())
+        .limit(top_n)
+    )
+    top_stmt = filters.apply(top_stmt)
+    top_ids = [r.id for r in (await db.execute(top_stmt)).all()]
+    if not top_ids:
+        return []
+
+    h = _hour_expr_ist()
+    stmt = (
+        select(
+            Campaign.id.label("campaign_id"),
+            Campaign.name.label("campaign_name"),
+            Vendor.name.label("vendor_name"),
+            Campaign.started_at,
+            h.label("hour"),
+            func.count(CallLog.id).label("total"),
+            func.sum(case((_is_connected, 1), else_=0)).label("connected"),
+            func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
+            func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
+            func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+        )
+        .join(CallLog, CallLog.campaign_id == Campaign.id)
+        .join(Vendor, Vendor.id == Campaign.vendor_id)
+        .where(Campaign.id.in_(top_ids))
+        .group_by(Campaign.id, Campaign.name, Vendor.name, Campaign.started_at, h)
+        .order_by(Campaign.started_at.desc().nulls_last(), h)
+    )
+    stmt = filters.apply(stmt)
+    rows = (await db.execute(stmt)).all()
+
+    by_c: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        cid = str(r.campaign_id)
+        if cid not in by_c:
+            date_str = r.started_at.strftime("%Y-%m-%d") if r.started_at else None
+            parts = [p for p in (date_str, r.vendor_name, r.campaign_name) if p]
+            display = " — ".join(parts)
+            by_c[cid] = {
+                "campaign_id": cid,
+                "campaign_name": r.campaign_name,
+                "display_name": display,
+                "hours": [],
+            }
+        total = int(r.total or 0)
+        connected = int(r.connected or 0)
+        engaged = int(r.engaged or 0)
+        interested = int(r.interested or 0)
+        by_c[cid]["hours"].append({
+            "hour": int(r.hour),
+            "total_calls": total,
+            "connected_calls": connected,
+            "engaged_calls": engaged,
+            "interested_calls": interested,
+            "avg_duration_seconds": float(r.avg_dur or 0),
+            "connection_rate": _safe_div(connected, total),
+            "engagement_rate": _safe_div(engaged, connected),
+            "interest_rate": _safe_div(interested, connected),
+        })
+    return list(by_c.values())
+
+
+async def hourly_insights(db: AsyncSession, filters: MetricFilters) -> dict[str, Any]:
+    """Single payload for the /hourly-insights page.
+
+    All sub-queries share the same filter window so cross-cutting comparisons
+    are consistent. Five sections:
+      - hour_breakdown:   one row per hour 0..23 (only hours with data)
+      - dow_breakdown:    one row per weekday 1..7 (only days with data)
+      - heatmap:          dow × hour cells (only cells with data)
+      - by_vendor:        per-vendor hour split
+      - by_campaign:      top-6 campaigns by volume, each with hour split
+    """
+    return {
+        "hour_breakdown":  await _hour_breakdown(db, filters),
+        "dow_breakdown":   await _dow_breakdown(db, filters),
+        "heatmap":         await _dow_hour_heatmap(db, filters),
+        "by_vendor":       await _hour_by_vendor(db, filters),
+        "by_campaign":     await _hour_by_campaign(db, filters),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Per-agent performance — answers "which AI script converts best?"
 # ---------------------------------------------------------------------------
 async def agent_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
