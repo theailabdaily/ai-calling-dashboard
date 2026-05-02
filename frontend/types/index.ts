@@ -259,3 +259,56 @@ export type AttemptsDistribution = {
   total_connected: number;
   total_calls: number;
 };
+
+// ---------------------------------------------------------------------------
+// Activity log / ledger — operational journal
+// ---------------------------------------------------------------------------
+
+export const LEDGER_ENTRY_TYPES = ['leads_given', 'campaign_created', 'note', 'config_change'] as const;
+export type LedgerEntryType = typeof LEDGER_ENTRY_TYPES[number];
+
+export type LedgerLiveStats = {
+  total_calls: number;
+  unique_leads: number;
+  connected: number;
+  interested: number;
+  avg_duration_seconds: number;
+};
+
+export type LedgerEntry = {
+  id: string;
+  entry_type: LedgerEntryType;
+  title: string;
+  occurred_at: string;
+  vendor_id: string | null;
+  vendor_name: string | null;
+  campaign_id: string | null;
+  campaign_name: string | null;
+  campaign_vendor_request_id: string | null;
+  leads_total: number | null;
+  leads_unique: number | null;
+  notes: string | null;
+  metadata: Record<string, unknown>;
+  live_stats: LedgerLiveStats | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LedgerEntryInput = {
+  entry_type: LedgerEntryType;
+  title: string;
+  occurred_at?: string;
+  vendor_id?: string | null;
+  campaign_id?: string | null;
+  leads_total?: number | null;
+  leads_unique?: number | null;
+  notes?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
+export type LedgerListResponse = {
+  items: LedgerEntry[];
+  total: number;
+  page: number;
+  page_size: number;
+};
