@@ -33,6 +33,8 @@ async def list_calls(
     only_interested: bool = Query(False),
     failed_only: bool = Query(False),
     funnel_stage: str | None = Query(None, description="connected | engaged | interested | followup"),
+    sort_by: str = Query("when", description="when | duration | status"),
+    sort_order: str = Query("desc", description="asc | desc"),
     db: AsyncSession = Depends(get_db),
 ):
     base = (
@@ -88,8 +90,18 @@ async def list_calls(
     count_stmt = select(func.count()).select_from(base.subquery())
     total = (await db.execute(count_stmt)).scalar_one()
 
+    # Sorting — map sort_by name to column. Default to started_at DESC.
+    sort_col = {
+        "when": CallLog.started_at,
+        "duration": CallLog.duration_seconds,
+        "status": CallLog.lifecycle_status,
+    }.get(sort_by, CallLog.started_at)
+    direction = sort_col.asc() if sort_order == "asc" else sort_col.desc()
+    if sort_by == "when":
+        direction = direction.nullslast() if sort_order == "desc" else direction.nullsfirst()
+
     rows_stmt = (
-        base.order_by(CallLog.started_at.desc().nullslast())
+        base.order_by(direction)
             .limit(page_size)
             .offset((page - 1) * page_size)
     )
