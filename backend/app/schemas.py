@@ -301,3 +301,79 @@ class AttemptsDistribution(BaseModel):
     total_leads: int
     total_connected: int
     total_calls: int
+
+
+# ---------------------------------------------------------------------------
+# Ledger / activity log — manual journal of "what we did" (gave leads, made
+# campaign, changed prompt). Each entry can optionally link to a campaign;
+# when it does, the GET endpoint joins live call_logs stats so the user can
+# compare what they sent (leads_total) to what vendor actually dialed.
+# ---------------------------------------------------------------------------
+
+LEDGER_ENTRY_TYPES = ("leads_given", "campaign_created", "note", "config_change")
+
+
+class LedgerLiveStats(BaseModel):
+    """Live join from call_logs for the linked campaign — what really happened."""
+    total_calls: int
+    unique_leads: int
+    connected: int
+    interested: int
+    avg_duration_seconds: float
+
+
+class LedgerEntryIn(BaseModel):
+    entry_type: str  # validated against LEDGER_ENTRY_TYPES in the route
+    title: str
+    occurred_at: datetime | None = None  # defaults to now() server-side
+    vendor_id: UUID | None = None
+    campaign_id: UUID | None = None
+    leads_total: int | None = None
+    leads_unique: int | None = None
+    notes: str | None = None
+    metadata: dict[str, Any] = {}
+
+
+class LedgerEntryUpdate(BaseModel):
+    """All-optional partial update."""
+    entry_type: str | None = None
+    title: str | None = None
+    occurred_at: datetime | None = None
+    vendor_id: UUID | None = None
+    campaign_id: UUID | None = None
+    leads_total: int | None = None
+    leads_unique: int | None = None
+    notes: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class LedgerEntryOut(BaseModel):
+    id: UUID
+    entry_type: str
+    title: str
+    occurred_at: datetime
+
+    # Denormalized for display — saves the frontend a separate vendors/campaigns lookup
+    vendor_id: UUID | None
+    vendor_name: str | None = None
+    campaign_id: UUID | None
+    campaign_name: str | None = None
+    campaign_vendor_request_id: str | None = None
+
+    leads_total: int | None
+    leads_unique: int | None
+    notes: str | None
+    metadata: dict[str, Any] = {}
+
+    # Populated when campaign_id is set; null otherwise
+    live_stats: LedgerLiveStats | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class LedgerListResponse(BaseModel):
+    items: list[LedgerEntryOut]
+    total: int
+    page: int
+    page_size: int
