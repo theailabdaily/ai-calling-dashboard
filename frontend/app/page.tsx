@@ -6,7 +6,7 @@ import MetricCard from '@/components/ui/metric-card';
 import CallsOverTime from '@/components/charts/calls-over-time';
 import FunnelChart, { FunnelStageKey } from '@/components/charts/funnel';
 import VendorBars from '@/components/charts/vendor-bars';
-import HourlyAnalytics from '@/components/charts/hourly-analytics';
+import OutcomeDistribution from '@/components/charts/outcome-distribution';
 import InsightsPanel from '@/components/ui/insights-panel';
 import FunnelStageDrawer from '@/components/calls/funnel-stage-drawer';
 import CallDetailDrawer from '@/components/calls/call-detail-drawer';
@@ -53,7 +53,7 @@ export default function OverviewPage() {
   const series  = useQuery({ queryKey: ['series', filters],  queryFn: () => api.timeSeries(filters) });
   const funnel  = useQuery({ queryKey: ['funnel', filters],  queryFn: () => api.funnel(filters) });
   const vcomp   = useQuery({ queryKey: ['vcomp', filters],   queryFn: () => api.vendorComparison(filters) });
-  const hourly  = useQuery({ queryKey: ['hourly', filters],  queryFn: () => api.hourly(filters) });
+  const outcomes = useQuery({ queryKey: ['outcomes', filters], queryFn: () => api.outcomes(filters) });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
   const insights = overviewInsights(metrics.data, funnel.data, vcomp.data, series.data);
@@ -69,20 +69,20 @@ export default function OverviewPage() {
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
 
-      {/* Row 1 — volume → outcome pipeline */}
+      {/* Row 1 — Unique leads first (the honest reach number), then call-attempt funnel */}
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <MetricCard
-          label="Total calls"
-          value={metrics.data ? fmt.int(metrics.data.total_calls) : '—'}
-          hint={metrics.data && metrics.data.unique_leads ? `${metrics.data.attempts_per_lead.toFixed(2)} attempts/lead` : undefined}
-          tooltip={T.total}
+          label="Unique leads"
+          value={metrics.data ? fmt.int(metrics.data.unique_leads ?? 0) : '—'}
+          hint={metrics.data ? `${fmt.int(metrics.data.unique_connected_leads ?? 0)} reached, ${fmt.int(metrics.data.unique_interested_leads ?? 0)} interested` : undefined}
+          tooltip={T.uniqueLeads}
           accent
         />
         <MetricCard
-          label="Unique leads"
-          value={metrics.data ? fmt.int(metrics.data.unique_leads) : '—'}
-          hint={metrics.data ? `${fmt.int(metrics.data.unique_connected_leads)} reached, ${fmt.int(metrics.data.unique_interested_leads)} interested` : undefined}
-          tooltip={T.uniqueLeads}
+          label="Total calls"
+          value={metrics.data ? fmt.int(metrics.data.total_calls) : '—'}
+          hint={metrics.data && (metrics.data.unique_leads ?? 0) > 0 ? `${(metrics.data.attempts_per_lead ?? 0).toFixed(2)} attempts/lead` : undefined}
+          tooltip={T.total}
         />
         <MetricCard
           label="Connected"
@@ -100,7 +100,7 @@ export default function OverviewPage() {
         <MetricCard
           label="Conversion"
           value={metrics.data ? fmt.pct(metrics.data.conversion_rate) : '—'}
-          hint={metrics.data && metrics.data.unique_leads ? `Lead-based: ${fmt.pct(metrics.data.lead_conversion_rate)}` : undefined}
+          hint={metrics.data && (metrics.data.unique_leads ?? 0) > 0 ? `Lead-based: ${fmt.pct(metrics.data.lead_conversion_rate ?? 0)}` : undefined}
           tooltip={T.conversion}
         />
       </div>
@@ -143,7 +143,7 @@ export default function OverviewPage() {
         />
       </div>
 
-      <HourlyAnalytics data={hourly.data || []} />
+      <OutcomeDistribution data={outcomes.data} isLoading={outcomes.isLoading} />
 
       <InsightsPanel
         insights={insights}
