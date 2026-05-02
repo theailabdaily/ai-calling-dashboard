@@ -1,6 +1,6 @@
 import type {
   Agent, AgentPerformanceRow, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
-  FunnelStage, HourBucket, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
+  FunnelStage, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
   Vendor, VendorRow,
 } from '@/types';
 
@@ -28,8 +28,6 @@ export const api = {
 
   overviewMetrics: (f: Filters) =>
     jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
-  hourly: (f: Filters) =>
-    jget<HourBucket[]>(`/api/overview/hourly?${buildQuery(f)}`),
   timeSeries: (f: Filters, bucket = 'day') =>
     jget<TimeBucket[]>(`/api/overview/time-series?bucket=${bucket}&${buildQuery(f)}`),
   funnel: (f: Filters) =>
@@ -92,11 +90,31 @@ export const api = {
 
   // Trigger campaign
   triggerCampaign: (body: TriggerCampaignRequest) =>
-    fetch(`${API_BASE}/api/campaigns/trigger`, {
+    fetch(`${API_BASE}/api/ingest/push-to-vendor`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }).then(r => r.json() as Promise<TriggerCampaignResponse>),
+
+  // CSV upload path — recipients already parsed client-side
+  pushRecipients: (body: {
+    vendor_slug: string;
+    vendor_agent_id: string;
+    campaign_name?: string;
+    recipients: Array<{
+      callee_name: string;
+      mobile_number: string;
+      custom_data?: Record<string, string>;
+    }>;
+  }) =>
+    fetch(`${API_BASE}/api/ingest/push-recipients`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async r => {
+      if (!r.ok) throw new Error(await r.text());
+      return r.json() as Promise<TriggerCampaignResponse>;
+    }),
 };
 
 // Number formatting helpers (Indian locale)
