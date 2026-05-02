@@ -377,3 +377,25 @@ class LedgerListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class PendingCampaign(BaseModel):
+    """A campaign that has no ledger entry attached yet — operational debt the
+    Activity Log surfaces so every campaign ends up with a journal note."""
+    campaign_id: UUID
+    campaign_name: str
+    vendor_id: UUID
+    vendor_name: str
+    vendor_request_id: str
+    started_at: datetime | None = None
+    expected_calls: int | None = None
+    # Live counts so the user can see "this campaign already dialed 487 unique
+    # leads — go log it" right in the banner without a second fetch.
+    total_calls: int = 0
+    unique_leads: int = 0
+
+
+class PendingCampaignsResponse(BaseModel):
+    items: list[PendingCampaign]
+    total: int
+    days: int  # window the backend used (echoed back for clarity)
