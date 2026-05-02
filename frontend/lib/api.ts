@@ -1,8 +1,8 @@
 import type {
   Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
   FunnelStage, HourBucket, HourlyInsights, LedgerEntry, LedgerEntryInput, LedgerEntryType, LedgerListResponse,
-  OutcomeDistribution, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
-  Vendor, VendorRow,
+  LedgerLiveStats, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, TimeBucket,
+  TriggerCampaignRequest, TriggerCampaignResponse, Vendor, VendorRow,
 } from '@/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
@@ -173,6 +173,16 @@ export const api = {
     fetch(`${API_BASE}/api/ledger/${id}`, { method: 'DELETE' }).then(async r => {
       if (!r.ok) throw new Error(await r.text());
     }),
+
+  // Campaigns that don't yet have a ledger entry — drives the "X pending"
+  // banner on the Activity Log page.
+  ledgerPendingCampaigns: (days = 30): Promise<PendingCampaignsResponse> =>
+    jget<PendingCampaignsResponse>(`/api/ledger/pending-campaigns?days=${days}`),
+
+  // Live stats for one campaign — used by the New Entry form to auto-fill
+  // leads_total / leads_unique when the user picks a campaign.
+  ledgerCampaignStats: (campaignId: string): Promise<LedgerLiveStats> =>
+    jget<LedgerLiveStats>(`/api/ledger/campaign-stats/${campaignId}`),
 };
 
 // Number formatting helpers (Indian locale)
