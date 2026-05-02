@@ -1,6 +1,6 @@
 import type {
   Agent, AgentPerformanceRow, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
-  FunnelStage, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
+  FunnelStage, HourBucket, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
   Vendor, VendorRow,
 } from '@/types';
 
@@ -27,6 +27,7 @@ export const api = {
   agents: () => jget<Agent[]>('/api/agents'),
 
   overviewMetrics: (f: Filters) => jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
+  hourly: (f: Filters) => jget<HourBucket[]>(`/api/overview/hourly?${buildQuery(f)}`),
   timeSeries: (f: Filters, bucket = 'day') => jget<TimeBucket[]>(`/api/overview/time-series?bucket=${bucket}&${buildQuery(f)}`),
   funnel: (f: Filters) => jget<FunnelStage[]>(`/api/overview/funnel?${buildQuery(f)}`),
   vendorComparison: (f: Filters) => jget<VendorRow[]>(`/api/overview/vendor-comparison?${buildQuery(f)}`),
@@ -51,6 +52,7 @@ export const api = {
     status?: string; answered_by?: string;
     only_with_recording?: boolean; only_interested?: boolean;
     funnel_stage?: string;
+    failed_only?: boolean;
   }): Promise<CallListPage> => {
     const q = new URLSearchParams(buildQuery(params.f));
     if (params.page) q.set('page', String(params.page));
@@ -61,6 +63,7 @@ export const api = {
     if (params.only_with_recording) q.set('only_with_recording', 'true');
     if (params.only_interested) q.set('only_interested', 'true');
     if (params.funnel_stage) q.set('funnel_stage', params.funnel_stage);
+    if (params.failed_only) q.set('failed_only', 'true');
     return jget<CallListPage>(`/api/calls?${q.toString()}`);
   },
   callDetail: (id: string) => jget<CallDetail>(`/api/calls/${id}`),
