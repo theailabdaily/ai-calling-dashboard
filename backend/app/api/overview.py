@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._filters import parse_filters
 from app.database import get_db
-from app.schemas import FunnelStage, HourBucket, OutcomeDistribution, OverviewMetrics, TimeBucket, VendorRow
+from app.schemas import AttemptsDistribution, FunnelStage, HourBucket, OutcomeDistribution, OverviewMetrics, TimeBucket, VendorRow
 from app.services import metrics
 from app.services.metrics import MetricFilters
 
@@ -63,3 +63,11 @@ async def get_outcomes(
     db: AsyncSession = Depends(get_db),
 ):
     return await metrics.outcome_distribution(db, filters)
+
+
+@router.get("/attempts-distribution", response_model=AttemptsDistribution)
+async def get_attempts_distribution(
+    filters: MetricFilters = Depends(parse_filters),
+    db: AsyncSession = Depends(get_db),
+):
+    return await metrics.attempts_distribution(db, filters)
