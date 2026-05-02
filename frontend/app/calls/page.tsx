@@ -1,7 +1,10 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'next/navigation';
-import { Search, Volume2, ChevronLeft, ChevronRight, Star, AlertCircle } from 'lucide-react';
+import {
+  Search, Volume2, ChevronLeft, ChevronRight, Star, AlertCircle,
+  ChevronUp, ChevronDown, ChevronsUpDown,
+} from 'lucide-react';
 import { Suspense, useEffect, useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 
@@ -12,6 +15,26 @@ import { StatusBadge } from '@/components/ui/badge';
 import { api, fmt } from '@/lib/api';
 import { callsInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
+
+type SortKey = 'when' | 'duration' | 'status';
+type SortOrder = 'asc' | 'desc';
+
+const STATUS_OPTIONS = [
+  { value: '',              label: 'All statuses' },
+  { value: 'COMPLETED',     label: 'Completed' },
+  { value: 'NOT_CONNECTED', label: 'Not connected' },
+  { value: 'FAILED',        label: 'Failed' },
+  { value: 'IN_PROGRESS',   label: 'In progress' },
+  { value: 'SCHEDULED',     label: 'Scheduled' },
+  { value: 'CANCELLED',     label: 'Cancelled' },
+];
+
+const PICKUP_OPTIONS = [
+  { value: '',        label: 'Any pickup' },
+  { value: 'HUMAN',   label: 'Human' },
+  { value: 'MACHINE', label: 'Voicemail / machine' },
+  { value: 'UNKNOWN', label: 'Unknown' },
+];
 
 function defaultFilters(): Filters {
   return {
@@ -37,8 +60,34 @@ function filtersFromUrl(sp: URLSearchParams): Filters {
   return base;
 }
 
-// Inner component owns all client state. It's the one that calls useSearchParams,
-// so it has to live inside <Suspense>. The exported default just wires that up.
+// Sortable column header — clickable, shows arrow indicator
+function SortHeader({
+  label, sortKey, currentKey, currentOrder, onSort, align = 'left',
+}: {
+  label: string;
+  sortKey: SortKey;
+  currentKey: SortKey;
+  currentOrder: SortOrder;
+  onSort: (key: SortKey) => void;
+  align?: 'left' | 'right';
+}) {
+  const isActive = currentKey === sortKey;
+  const Icon = isActive ? (currentOrder === 'asc' ? ChevronUp : ChevronDown) : ChevronsUpDown;
+  return (
+    <button
+      onClick={() => onSort(sortKey)}
+      className={
+        'flex items-center gap-1 text-xs uppercase tracking-wider font-medium hover:text-brand-pink transition-colors ' +
+        (align === 'right' ? 'ml-auto' : '') +
+        (isActive ? ' text-brand-navy' : ' text-surface-500')
+      }
+    >
+      {label}
+      <Icon size={12} className={isActive ? 'text-brand-pink' : 'text-surface-400'} />
+    </button>
+  );
+}
+
 function CallsPageInner() {
   const searchParams = useSearchParams();
 
@@ -51,6 +100,10 @@ function CallsPageInner() {
   const [onlyRecording, setOnlyRecording] = useState(false);
   const [onlyInterested, setOnlyInterested] = useState(searchParams.get('only_interested') === 'true');
   const [failedOnly, setFailedOnly] = useState(searchParams.get('failed_only') === 'true');
+  const [statusFilter, setStatusFilter] = useState<string>('');
+  const [pickupFilter, setPickupFilter] = useState<string>('');
+  const [sortBy, setSortBy] = useState<SortKey>('when');
+  const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -64,8 +117,20 @@ function CallsPageInner() {
     setTimeout(() => setDebouncedSearch(search), 300);
   }
 
+  // When sorting by a different column, default to a sensible order
+  const handleSort = (key: SortKey) => {
+    if (key === sortBy) {
+      setSortOrder(o => (o === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortBy(key);
+      // Newest-first / longest-first / status A-Z
+      setSortOrder(key === 'status' ? 'asc' : 'desc');
+    }
+    setPage(1);
+  };
+
   const calls = useQuery({
-    queryKey: ['calls', filters, debouncedSearch, page, onlyRecording, onlyInterested, failedOnly],
+    queryKey: ['calls', filters, debouncedSearch, page, onlyRecording, onlyInterested, failedOnly, statusFilter, pickupFilter, sortBy, sortOrder],
     queryFn: () => api.callsList({
       f: filters,
       page,
@@ -74,6 +139,10 @@ function CallsPageInner() {
       only_with_recording: onlyRecording,
       only_interested: onlyInterested,
       failed_only: failedOnly,
+      status: statusFilter || undefined,
+      answered_by: pickupFilter || undefined,
+      sort_by: sortBy,
+      sort_order: sortOrder,
     }),
   });
 
@@ -92,7 +161,7 @@ function CallsPageInner() {
       <header>
         <h1 className="text-2xl font-semibold text-brand-navy">Call logs</h1>
         <p className="text-sm text-surface-500 mt-1">
-          QA the AI agent. Search by phone or name, filter by outcome, click any row to listen.
+          QA the AI agent. Search by phone or name, filter by outcome, click any column header to sort.
         </p>
       </header>
 
@@ -115,6 +184,7 @@ function CallsPageInner() {
 
       <InsightsPanel insights={insights} subtitle="Patterns from the calls visible right now" />
 
+      {/* Search + filter row 1 */}
       <div className="card p-4 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[260px]">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500" />
@@ -126,6 +196,26 @@ function CallsPageInner() {
             className="w-full pl-9 pr-3 py-2 rounded-lg border border-surface-300 text-sm focus:outline-none focus:ring-2 focus:ring-brand-pink/30 focus:border-brand-pink"
           />
         </div>
+
+        <select
+          value={statusFilter}
+          onChange={e => { setStatusFilter(e.target.value); setPage(1); }}
+          className="px-3 py-2 rounded-lg border border-surface-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
+        >
+          {STATUS_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+
+        <select
+          value={pickupFilter}
+          onChange={e => { setPickupFilter(e.target.value); setPage(1); }}
+          className="px-3 py-2 rounded-lg border border-surface-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
+        >
+          {PICKUP_OPTIONS.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
 
         <button
           onClick={() => { setOnlyRecording(v => !v); setPage(1); }}
@@ -145,25 +235,45 @@ function CallsPageInner() {
         >
           <AlertCircle size={14} /> Failed only
         </button>
-
-        <span className="text-xs text-surface-500 ml-auto">
-          {calls.data ? `${fmt.int(calls.data.total)} calls` : '—'}
-        </span>
       </div>
 
+      {/* Result count + sort indicator */}
+      <div className="flex items-center justify-between text-xs text-surface-500 px-1">
+        <span>
+          {calls.data ? `${fmt.int(calls.data.total)} calls` : '—'}
+          {' · '}
+          Sorted by <strong className="text-surface-700">{sortBy}</strong> ({sortOrder})
+        </span>
+        {(statusFilter || pickupFilter) && (
+          <button
+            onClick={() => { setStatusFilter(''); setPickupFilter(''); setPage(1); }}
+            className="text-brand-pink hover:underline"
+          >
+            Clear status & pickup filters
+          </button>
+        )}
+      </div>
+
+      {/* Calls table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-xs uppercase tracking-wider text-surface-500 bg-surface-50">
-                <th className="px-5 py-3 font-medium">When</th>
-                <th className="px-3 py-3 font-medium">Callee</th>
-                <th className="px-3 py-3 font-medium">Vendor / Agent</th>
-                <th className="px-3 py-3 font-medium">Status</th>
-                <th className="px-3 py-3 font-medium">Pickup</th>
-                <th className="px-3 py-3 font-medium text-right">Duration</th>
-                <th className="px-3 py-3 font-medium">Outcome</th>
-                <th className="px-5 py-3 font-medium" />
+              <tr className="text-left bg-surface-50">
+                <th className="px-5 py-3">
+                  <SortHeader label="When" sortKey="when" currentKey={sortBy} currentOrder={sortOrder} onSort={handleSort} />
+                </th>
+                <th className="px-3 py-3 text-xs uppercase tracking-wider font-medium text-surface-500">Callee</th>
+                <th className="px-3 py-3 text-xs uppercase tracking-wider font-medium text-surface-500">Vendor / Agent</th>
+                <th className="px-3 py-3">
+                  <SortHeader label="Status" sortKey="status" currentKey={sortBy} currentOrder={sortOrder} onSort={handleSort} />
+                </th>
+                <th className="px-3 py-3 text-xs uppercase tracking-wider font-medium text-surface-500">Pickup</th>
+                <th className="px-3 py-3 text-right">
+                  <SortHeader label="Duration" sortKey="duration" currentKey={sortBy} currentOrder={sortOrder} onSort={handleSort} align="right" />
+                </th>
+                <th className="px-3 py-3 text-xs uppercase tracking-wider font-medium text-surface-500">Outcome</th>
+                <th className="px-5 py-3" />
               </tr>
             </thead>
             <tbody>
@@ -239,9 +349,6 @@ function CallsPageInner() {
   );
 }
 
-// Lightweight loading skeleton shown during the initial SSR pass + while
-// useSearchParams suspends. Matches the page's general shape so it doesn't
-// flash a blank screen.
 function CallsPageSkeleton() {
   return (
     <div className="p-6 space-y-5 max-w-[1400px]">
