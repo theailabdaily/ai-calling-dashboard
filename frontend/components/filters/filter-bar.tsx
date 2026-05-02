@@ -113,7 +113,7 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
   };
 
   return (
-    <div ref={containerRef} className="card p-4 flex flex-wrap items-center gap-3">
+    <div ref={containerRef} className="card p-3 md:p-4 flex flex-wrap items-center gap-2 md:gap-3">
       {/* Date range presets */}
       <div className="flex items-center gap-1 flex-wrap">
         <Calendar size={16} className="text-surface-500 mr-1" />
@@ -145,7 +145,7 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
         />
       </div>
 
-      <div className="flex-1" />
+      <div className="hidden lg:block flex-1" />
 
       {/* Vendor multi-select */}
       <div className="relative">
@@ -160,7 +160,7 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
           <ChevronDown size={14} />
         </button>
         {open === 'vendor' && (
-          <div className="absolute right-0 top-full mt-1 w-56 card p-2 z-30 shadow-lg">
+          <div className="absolute right-0 sm:right-0 top-full mt-1 w-56 max-w-[calc(100vw-2rem)] card p-2 z-30 shadow-lg">
             {(vendors.data || []).map(v => (
               <label key={v.id} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-surface-100 cursor-pointer">
                 <input
@@ -198,7 +198,7 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
           <ChevronDown size={14} />
         </button>
         {open === 'campaign' && (
-          <div className="absolute right-0 top-full mt-1 w-[28rem] max-w-[90vw] card p-2 z-30 max-h-80 overflow-y-auto shadow-lg">
+          <div className="absolute right-0 top-full mt-1 w-[28rem] max-w-[calc(100vw-2rem)] card p-2 z-30 max-h-80 overflow-y-auto shadow-lg">
             {visibleCampaigns.map(c => {
               const vendorName = vendorById.get(c.vendor_id)?.name;
               return (
