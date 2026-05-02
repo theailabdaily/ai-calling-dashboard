@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, case, distinct, func, select
+from sqlalchemy import and_, case, desc, distinct, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import CallLog, Campaign, Vendor
@@ -612,3 +612,81 @@ async def agent_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict
             "follow_up_rate": _safe_div(int(r.follow_up or 0), connected),
         })
     return out
+
+
+
+# ---------------------------------------------------------------------------
+# Outcome distribution — Hunar-style taxonomy built from our raw fields.
+# Two views:
+#   by_call: every call counted, grouped by outcome
+#   by_lead: deduped to last call per lead (mobile_number), then grouped
+# ---------------------------------------------------------------------------
+def _outcome_case():
+    """SQL CASE expression mapping (status, answered_by, result fields, duration)
+    onto a clean outcome label. Order matters — first match wins."""
+    return case(
+        # Pre-call states
+        (CallLog.status == "SCHEDULED", literal("Scheduled (not yet dialed)")),
+        (CallLog.status == "FAILED", literal("Failed (vendor)")),
+        (CallLog.status == "CANCELLED", literal("Cancelled")),
+        # Connection failures
+        (and_(CallLog.status == "NOT_CONNECTED", CallLog.answered_by == "MACHINE"), literal("Voicemail")),
+        (CallLog.status == "NOT_CONNECTED", literal("Phone Not Answered")),
+        # Connected — but answered_by is MACHINE means a voicemail picked up
+        (CallLog.answered_by == "MACHINE", literal("Voicemail")),
+        # Connected — outcomes from result JSONB
+        (CallLog.result["next_step_interest"].astext == "CALLBACK", literal("Callback Booked")),
+        (CallLog.result["objection_type"].astext == "NOT_INTERESTED", literal("Not Interested")),
+        (CallLog.result["objection_type"].astext == "TIME", literal("Objection: Time")),
+        (CallLog.result["objection_type"].astext == "FEES", literal("Objection: Fees")),
+        (CallLog.result["objection_type"].astext == "CAREER_CONFUSION", literal("Objection: Career")),
+        (and_(CallLog.duration_seconds.isnot(None), CallLog.duration_seconds < 15), literal("Short Hangup")),
+        (CallLog.result["interest_level"].astext == "HIGH", literal("High Interest")),
+        (CallLog.result["interest_level"].astext == "MEDIUM", literal("Medium Interest")),
+        (CallLog.result["interest_level"].astext == "LOW", literal("Low Interest")),
+        (CallLog.result["interest_level"].astext.in_(["Not Covered", "NOT AVAILABLE"]), literal("Connected — Outcome Unclear")),
+        else_=literal("Other"),
+    )
+
+
+async def outcome_distribution(db: AsyncSession, filters: MetricFilters) -> dict[str, list[dict[str, Any]]]:
+    """Return {by_call: [...], by_lead: [...]} with outcome counts + percentages.
+    by_lead deduplicates to the most recent call per mobile_number.
+    """
+    # ---------- by_call ----------
+    outcome = _outcome_case().label("outcome")
+    call_stmt = select(outcome, func.count().label("n"))
+    call_stmt = filters.apply(call_stmt).group_by("outcome").order_by(desc("n"))
+    call_rows = (await db.execute(call_stmt)).all()
+    total_calls = sum(int(r.n) for r in call_rows) or 1
+
+    by_call = [
+        {"outcome": r.outcome or "Other", "count": int(r.n), "pct": int(r.n) / total_calls}
+        for r in call_rows
+    ]
+
+    # ---------- by_lead ----------
+    # Inner query: rank calls per mobile_number (latest first); take rn=1.
+    # We do this in two SELECTs because window functions can't combine with GROUP BY easily.
+    valid_phone = and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != "")
+    rn = func.row_number().over(
+        partition_by=CallLog.mobile_number,
+        order_by=[CallLog.started_at.desc().nullslast(), CallLog.vendor_created_at.desc()],
+    ).label("rn")
+
+    inner = select(
+        outcome,
+        rn,
+    ).where(valid_phone)
+    inner = filters.apply(inner).subquery()
+
+    lead_stmt = select(inner.c.outcome, func.count().label("n")).where(inner.c.rn == 1).group_by(inner.c.outcome).order_by(desc("n"))
+    lead_rows = (await db.execute(lead_stmt)).all()
+    total_leads = sum(int(r.n) for r in lead_rows) or 1
+
+    by_lead = [
+        {"outcome": r.outcome or "Other", "count": int(r.n), "pct": int(r.n) / total_leads}
+        for r in lead_rows
+    ]
+
+    return {"by_call": by_call, "by_lead": by_lead}
