@@ -40,6 +40,11 @@ export type OverviewMetrics = {
   interest_rate: number;
   follow_up_rate: number;
   conversion_rate: number;
+  unique_leads: number;
+  unique_connected_leads: number;
+  unique_interested_leads: number;
+  attempts_per_lead: number;
+  lead_conversion_rate: number;
 };
 
 export type TimeBucket = { bucket: string | null; total: number; connected: number; interested: number };
@@ -115,6 +120,8 @@ export type VendorRow = {
   engagement_rate: number;
   interest_rate: number;
   follow_up_rate: number;
+  unique_leads: number;
+  attempts_per_lead: number;
 };
 
 export type CampaignRow = {
