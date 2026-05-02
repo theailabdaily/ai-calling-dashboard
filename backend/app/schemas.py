@@ -205,3 +205,17 @@ class TriggerCampaignResponse(BaseModel):
     recipients_pushed: int
     vendor_response: dict[str, Any] | None = None
     warning: str | None = None
+
+
+class CsvRecipient(BaseModel):
+    callee_name: str
+    mobile_number: str
+    custom_data: dict[str, Any] = {}
+
+
+class PushRecipientsRequest(BaseModel):
+    """Direct-recipient launch — used by CSV upload path. No sheet involved."""
+    vendor_slug: str
+    vendor_agent_id: str
+    campaign_name: str | None = None
+    recipients: list[CsvRecipient]
