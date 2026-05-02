@@ -244,3 +244,17 @@ export type OutcomeDistribution = {
   by_call: OutcomeRow[];
   by_lead: OutcomeRow[];
 };
+
+export type AttemptsRow = {
+  attempts: number;        // how many calls a single lead received
+  leads: number;           // how many unique leads got exactly this many attempts
+  calls_consumed: number;  // = attempts * leads (dial volume in this bucket)
+  pct_of_leads: number;    // leads / total_leads
+  pct_of_calls: number;    // calls_consumed / total_calls
+};
+
+export type AttemptsDistribution = {
+  rows: AttemptsRow[];
+  total_leads: number;
+  total_calls: number;
+};
