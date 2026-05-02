@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._filters import parse_filters
 from app.database import get_db
-from app.schemas import FunnelStage, OverviewMetrics, TimeBucket, VendorRow
+from app.schemas import FunnelStage, HourBucket, OverviewMetrics, TimeBucket, VendorRow
 from app.services import metrics
 from app.services.metrics import MetricFilters
 
@@ -46,3 +46,11 @@ async def get_vendor_comparison(
     db: AsyncSession = Depends(get_db),
 ):
     return await metrics.vendor_comparison(db, filters)
+
+
+@router.get("/hourly", response_model=list[HourBucket])
+async def get_hourly(
+    filters: MetricFilters = Depends(parse_filters),
+    db: AsyncSession = Depends(get_db),
+):
+    return await metrics.hourly_breakdown(db, filters)
