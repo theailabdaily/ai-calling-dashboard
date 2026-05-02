@@ -70,6 +70,14 @@ async def ensure_campaign(
     started_at: datetime | None = None,
     name: str | None = None,
 ) -> UUID:
+    # Defense in depth: even if some other code path reaches this fn directly
+    # (e.g. a future campaign-list sync), refuse to create excluded campaigns.
+    # Returns None semantically — but the type is UUID, so we raise instead so
+    # callers don't silently store None as a campaign_id.
+    if vendor_request_id in EXCLUDED_VENDOR_REQUEST_IDS:
+        logger.debug("ensure_campaign refused excluded request_id=%s", vendor_request_id)
+        raise ValueError(f"campaign vendor_request_id={vendor_request_id} is excluded")
+
     res = await db.execute(
         select(Campaign.id).where(
             Campaign.vendor_id == vendor_id,
