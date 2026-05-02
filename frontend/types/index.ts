@@ -312,3 +312,21 @@ export type LedgerListResponse = {
   page: number;
   page_size: number;
 };
+
+export type PendingCampaign = {
+  campaign_id: string;
+  campaign_name: string;
+  vendor_id: string;
+  vendor_name: string;
+  vendor_request_id: string;
+  started_at: string | null;
+  expected_calls: number | null;
+  total_calls: number;
+  unique_leads: number;
+};
+
+export type PendingCampaignsResponse = {
+  items: PendingCampaign[];
+  total: number;
+  days: number;
+};
