@@ -246,15 +246,16 @@ export type OutcomeDistribution = {
 };
 
 export type AttemptsRow = {
-  attempts: number;        // how many calls a single lead received
-  leads: number;           // how many unique leads got exactly this many attempts
-  calls_consumed: number;  // = attempts * leads (dial volume in this bucket)
-  pct_of_leads: number;    // leads / total_leads
-  pct_of_calls: number;    // calls_consumed / total_calls
+  attempts: number;       // total dial attempts on the lead (retry_count + 1, summed across rows)
+  leads: number;          // unique leads that received exactly this many attempts
+  connected: number;      // of those leads, how many ever picked up (HUMAN + COMPLETED)
+  pct_of_leads: number;   // leads / total_leads
+  connect_rate: number;   // connected / leads — the cohort pickup rate (most useful column)
 };
 
 export type AttemptsDistribution = {
   rows: AttemptsRow[];
   total_leads: number;
+  total_connected: number;
   total_calls: number;
 };
