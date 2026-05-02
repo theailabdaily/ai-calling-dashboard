@@ -1,6 +1,6 @@
 import type {
   Agent, AgentPerformanceRow, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
-  FunnelStage, HourBucket, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
+  FunnelStage, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
   Vendor, VendorRow,
 } from '@/types';
 
@@ -26,19 +26,25 @@ export const api = {
   campaigns: () => jget<Campaign[]>('/api/campaigns'),
   agents: () => jget<Agent[]>('/api/agents'),
 
-  overviewMetrics: (f: Filters) => jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
-  hourly: (f: Filters) => jget<HourBucket[]>(`/api/overview/hourly?${buildQuery(f)}`),
-  timeSeries: (f: Filters, bucket = 'day') => jget<TimeBucket[]>(`/api/overview/time-series?bucket=${bucket}&${buildQuery(f)}`),
-  funnel: (f: Filters) => jget<FunnelStage[]>(`/api/overview/funnel?${buildQuery(f)}`),
-  vendorComparison: (f: Filters) => jget<VendorRow[]>(`/api/overview/vendor-comparison?${buildQuery(f)}`),
-  campaignBreakdown: (f: Filters) => jget<CampaignRow[]>(`/api/campaigns/breakdown?${buildQuery(f)}`),
+  overviewMetrics: (f: Filters) =>
+    jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
+  timeSeries: (f: Filters, bucket = 'day') =>
+    jget<TimeBucket[]>(`/api/overview/time-series?bucket=${bucket}&${buildQuery(f)}`),
+  funnel: (f: Filters) =>
+    jget<FunnelStage[]>(`/api/overview/funnel?${buildQuery(f)}`),
+  vendorComparison: (f: Filters) =>
+    jget<VendorRow[]>(`/api/overview/vendor-comparison?${buildQuery(f)}`),
+  campaignBreakdown: (f: Filters) =>
+    jget<CampaignRow[]>(`/api/campaigns/breakdown?${buildQuery(f)}`),
 
   exportCallsUrl: (f: Filters, funnel_stage?: string) => {
     const q = buildQuery(f);
     return `${API_BASE}/api/export/calls.csv?${q}${funnel_stage ? `&funnel_stage=${funnel_stage}` : ''}`;
   },
+
   triggerSync: (slug: string) =>
     fetch(`${API_BASE}/api/vendors/${slug}/sync`, { method: 'POST' }).then(r => r.json()),
+
   importSheet: (sheet_id: string, worksheet_name?: string) =>
     fetch(`${API_BASE}/api/ingest/google-sheets`, {
       method: 'POST',
@@ -48,15 +54,18 @@ export const api = {
 
   // Calls list + detail
   callsList: (params: {
-    f: Filters; page?: number; page_size?: number; search?: string;
-    status?: string; answered_by?: string;
-    only_with_recording?: boolean; only_interested?: boolean;
+    f: Filters;
+    page?: number;
+    page_size?: number;
+    search?: string;
+    status?: string;
+    answered_by?: string;
+    only_with_recording?: boolean;
+    only_interested?: boolean;
     funnel_stage?: string;
     failed_only?: boolean;
     sort_by?: 'when' | 'duration' | 'status';
     sort_order?: 'asc' | 'desc';
-    status?: string;
-    answered_by?: string;
   }): Promise<CallListPage> => {
     const q = new URLSearchParams(buildQuery(params.f));
     if (params.page) q.set('page', String(params.page));
@@ -72,22 +81,20 @@ export const api = {
     if (params.sort_order) q.set('sort_order', params.sort_order);
     return jget<CallListPage>(`/api/calls?${q.toString()}`);
   },
+
   callDetail: (id: string) => jget<CallDetail>(`/api/calls/${id}`),
 
-  // Agent performance
+  // Agents
   agentPerformance: (f: Filters) =>
     jget<AgentPerformanceRow[]>(`/api/agents/performance?${buildQuery(f)}`),
 
-  // Trigger a campaign (Sheets → vendor)
-  triggerCampaign: (req: TriggerCampaignRequest): Promise<TriggerCampaignResponse> =>
-    fetch(`${API_BASE}/api/ingest/push-to-vendor`, {
+  // Trigger campaign
+  triggerCampaign: (body: TriggerCampaignRequest) =>
+    fetch(`${API_BASE}/api/campaigns/trigger`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
-    }).then(async r => {
-      if (!r.ok) throw new Error((await r.json()).detail || 'Request failed');
-      return r.json();
-    }),
+      body: JSON.stringify(body),
+    }).then(r => r.json() as Promise<TriggerCampaignResponse>),
 };
 
 // Number formatting helpers (Indian locale)
