@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api._filters import parse_filters
 from app.database import get_db
-from app.schemas import FunnelStage, HourBucket, OverviewMetrics, TimeBucket, VendorRow
+from app.schemas import FunnelStage, HourBucket, OutcomeDistribution, OverviewMetrics, TimeBucket, VendorRow
 from app.services import metrics
 from app.services.metrics import MetricFilters
 
@@ -54,3 +54,12 @@ async def get_hourly(
     db: AsyncSession = Depends(get_db),
 ):
     return await metrics.hourly_breakdown(db, filters)
+
+
+
+@router.get("/outcomes", response_model=OutcomeDistribution)
+async def get_outcomes(
+    filters: MetricFilters = Depends(parse_filters),
+    db: AsyncSession = Depends(get_db),
+):
+    return await metrics.outcome_distribution(db, filters)
