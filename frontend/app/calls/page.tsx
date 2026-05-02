@@ -157,16 +157,16 @@ function CallsPageInner() {
     null;
 
   return (
-    <div className="p-6 space-y-5 max-w-[1400px]">
+    <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
       <header>
-        <h1 className="text-2xl font-semibold text-brand-navy">Call logs</h1>
-        <p className="text-sm text-surface-500 mt-1">
-          QA the AI agent. Search by phone or name, filter by outcome, click any column header to sort.
+        <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">Call logs</h1>
+        <p className="text-xs md:text-sm text-surface-500 mt-1">
+          QA the AI agent. Search by phone or name, filter by outcome, tap any row to inspect.
         </p>
       </header>
 
       {activeDeepFilter && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 flex items-center gap-2 text-sm">
+        <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 md:px-4 py-2 md:py-2.5 flex items-center gap-2 text-xs md:text-sm">
           <AlertCircle size={14} className="text-amber-600 shrink-0" />
           <span className="text-amber-900 flex-1">
             Filtered to: <strong>{activeDeepFilter.label}</strong>
@@ -185,8 +185,8 @@ function CallsPageInner() {
       <InsightsPanel insights={insights} subtitle="Patterns from the calls visible right now" />
 
       {/* Search + filter row 1 */}
-      <div className="card p-4 flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[260px]">
+      <div className="card p-3 md:p-4 flex flex-wrap items-center gap-2 md:gap-3">
+        <div className="relative flex-1 min-w-full sm:min-w-[260px]">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500" />
           <input
             type="text"
@@ -254,8 +254,71 @@ function CallsPageInner() {
         )}
       </div>
 
-      {/* Calls table */}
-      <div className="card overflow-hidden">
+      {/* Mobile: card-per-row */}
+      <div className="md:hidden space-y-2">
+        {(calls.data?.items || []).map(c => (
+          <button
+            key={c.id}
+            onClick={() => setSelectedCallId(c.id)}
+            className="card p-3 w-full text-left active:bg-surface-50 transition-colors"
+          >
+            <div className="flex items-start justify-between gap-2 mb-1.5">
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-brand-navy text-sm truncate">{c.callee_name || '—'}</div>
+                <div className="text-xs text-surface-500 tabular-nums">{c.mobile_number || ''}</div>
+              </div>
+              <StatusBadge status={c.lifecycle_status} />
+            </div>
+            <div className="flex items-center justify-between text-xs text-surface-500">
+              <span>{c.started_at ? formatDistanceToNow(new Date(c.started_at), { addSuffix: true }) : '—'}</span>
+              <span className="tabular-nums">{c.duration_seconds ? fmt.duration(c.duration_seconds) : '—'}</span>
+            </div>
+            {(c.interested || c.follow_up_at || c.has_recording) && (
+              <div className="mt-1.5 flex items-center gap-2 flex-wrap text-xs">
+                {c.interested && (
+                  <span className="text-emerald-700 font-medium">Interest: {c.interested}</span>
+                )}
+                {c.follow_up_at && !c.interested && (
+                  <span className="text-brand-pink font-medium">Callback: {c.follow_up_at}</span>
+                )}
+                {c.has_recording && <Volume2 size={12} className="text-brand-pink" />}
+              </div>
+            )}
+            <div className="mt-1.5 text-[11px] text-surface-400 truncate">
+              {c.vendor_name}{c.agent_name ? ` · ${c.agent_name}` : ''}
+            </div>
+          </button>
+        ))}
+        {!calls.data?.items.length && !calls.isLoading && (
+          <div className="card p-8 text-center text-sm text-surface-500">
+            No calls match these filters.
+          </div>
+        )}
+
+        {/* Mobile pagination */}
+        <div className="flex items-center justify-between pt-1 px-1 text-xs">
+          <span className="text-surface-500">Page {page} of {totalPages}</span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage(p => Math.max(1, p - 1))}
+              disabled={page === 1}
+              className="btn-outline px-3 py-1.5 disabled:opacity-40"
+            >
+              <ChevronLeft size={14} />
+            </button>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+              disabled={page >= totalPages}
+              className="btn-outline px-3 py-1.5 disabled:opacity-40"
+            >
+              <ChevronRight size={14} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Desktop: full table — hidden below md */}
+      <div className="card overflow-hidden hidden md:block">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -351,10 +414,10 @@ function CallsPageInner() {
 
 function CallsPageSkeleton() {
   return (
-    <div className="p-6 space-y-5 max-w-[1400px]">
+    <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
       <header>
-        <h1 className="text-2xl font-semibold text-brand-navy">Call logs</h1>
-        <p className="text-sm text-surface-500 mt-1">Loading…</p>
+        <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">Call logs</h1>
+        <p className="text-xs md:text-sm text-surface-500 mt-1">Loading…</p>
       </header>
       <div className="card p-4 h-16 animate-pulse bg-surface-100" />
       <div className="card p-4 h-32 animate-pulse bg-surface-100" />
