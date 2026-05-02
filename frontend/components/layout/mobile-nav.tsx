@@ -4,7 +4,7 @@ import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  LayoutDashboard, Users, Phone, Bot, Send, Clock, Menu, X,
+  LayoutDashboard, Users, Phone, Bot, Send, Clock, Menu, X, ScrollText,
 } from 'lucide-react';
 import { cn } from '@/lib/api';
 
@@ -17,6 +17,7 @@ const NAV = [
   { href: '/vendors',         label: 'Vendor Analysis',   icon: Users },
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/calls',           label: 'Call Logs',         icon: Phone },
+  { href: '/ledger',          label: 'Activity Log',      icon: ScrollText },
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
 ];
 
