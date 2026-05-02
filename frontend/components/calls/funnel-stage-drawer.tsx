@@ -45,10 +45,10 @@ export default function FunnelStageDrawer({ filters, stage, stageLabel, onClose,
 
       {/* Drawer */}
       <aside className="fixed right-0 top-0 h-screen w-full max-w-3xl bg-surface-50 z-50 shadow-2xl overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b border-surface-200 px-6 py-4 flex items-center justify-between z-10">
+        <div className="sticky top-0 bg-white border-b border-surface-200 px-4 md:px-6 py-3 md:py-4 flex flex-wrap items-center justify-between gap-2 z-10">
           <div>
             <div className="text-xs text-surface-500 uppercase tracking-wider">Funnel stage</div>
-            <h2 className="text-lg font-semibold text-brand-navy">{stageLabel}</h2>
+            <h2 className="text-base md:text-lg font-semibold text-brand-navy">{stageLabel}</h2>
             <div className="text-xs text-surface-500 mt-0.5">
               {filters.start.toLocaleDateString('en-IN')} → {filters.end.toLocaleDateString('en-IN')}
               {calls.data && <span className="ml-2">· {fmt.int(calls.data.total)} calls</span>}
