@@ -1,156 +1,180 @@
-"""SQLAlchemy models — mirror /db/schema.sql exactly."""
-from __future__ import annotations
-from datetime import datetime
-from typing import Any
-import uuid
+🧠 What You Actually Need (in simple terms)
 
-from sqlalchemy import (
-    Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, Index, func
-)
-from sqlalchemy.dialects.postgresql import JSONB, UUID, ENUM as PgEnum
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+You don’t need “another tool.”
 
-from app.database import Base
+You need a Lead Intelligence Dashboard with 3 layers:
 
+1. Data Cleaning Layer (Fix the mess)
+Remove duplicates
+Standardize fields (exam name, phone, email, etc.)
+Tag leads properly
+2. Insight Layer (Make sense)
+Which exam demand is highest
+Which lead magnets are working
+Lead quality segmentation
+3. Decision Layer (Take action)
+Which workshop to run next
+Which exam category to focus on
+Where volume vs quality is coming from
+🏗️ System Architecture (simple + practical)
+Backend (you already mentioned it)
+Use Supabase
+Tables:
 
-# Enums (match the Postgres types)
-CALL_STATUS_VALUES = (
-    "NOT_STARTED", "SCHEDULED", "INITIATED", "RINGING", "IN_PROGRESS",
-    "COMPLETED", "NOT_CONNECTED", "CANCELLED", "FAILED", "UNKNOWN",
-)
-ENGAGEMENT_VALUES = ("ENGAGED", "NOT_ENGAGED", "UNKNOWN")
-ANSWERED_BY_VALUES = ("HUMAN", "MACHINE", "UNKNOWN")
-ENDED_BY_VALUES = ("AGENT", "USER", "UNKNOWN")
-LEAD_SOURCE_VALUES = ("google_sheets", "api", "manual", "csv_upload")
-CAMPAIGN_SOURCE_VALUES = ("vendor_ui", "sheets_import", "api", "manual")
-SYNC_STATUS_VALUES = ("running", "success", "partial", "failed")
-SYNC_JOB_VALUES = ("agents", "calls", "campaigns", "sheets_leads")
+Leads Table
 
+name
+phone
+email
+exam_preparing_for
+source (lead magnet type)
+created_at
 
-CallStatusEnum = PgEnum(*CALL_STATUS_VALUES, name="call_status", create_type=False)
-EngagementEnum = PgEnum(*ENGAGEMENT_VALUES, name="engagement_status", create_type=False)
-AnsweredByEnum = PgEnum(*ANSWERED_BY_VALUES, name="answered_by", create_type=False)
-EndedByEnum = PgEnum(*ENDED_BY_VALUES, name="call_ended_by", create_type=False)
-LeadSourceEnum = PgEnum(*LEAD_SOURCE_VALUES, name="lead_source", create_type=False)
-CampaignSourceEnum = PgEnum(*CAMPAIGN_SOURCE_VALUES, name="campaign_source", create_type=False)
-SyncStatusEnum = PgEnum(*SYNC_STATUS_VALUES, name="sync_status", create_type=False)
-SyncJobEnum = PgEnum(*SYNC_JOB_VALUES, name="sync_job", create_type=False)
+Events Table
 
+workshop attended
+actions taken
 
-class Vendor(Base):
-    __tablename__ = "vendors"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.uuid_generate_v4())
-    slug: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    api_base_url: Mapped[str] = mapped_column(String, nullable=False)
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+Tags Table
 
+duplicate / unique
+hot / warm / cold
+⚙️ Core Features You Need to Build
+1. Duplicate Detection (VERY important)
 
-class Agent(Base):
-    __tablename__ = "agents"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.uuid_generate_v4())
-    vendor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False)
-    vendor_agent_id: Mapped[str] = mapped_column(String, nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    language: Mapped[str | None] = mapped_column(String)
-    voice_persona: Mapped[str | None] = mapped_column(String)
-    result_schema: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+Your biggest current problem.
 
-    __table_args__ = (UniqueConstraint("vendor_id", "vendor_agent_id"),)
+Use:
 
+Phone number match
+Email match
 
-class Campaign(Base):
-    __tablename__ = "campaigns"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.uuid_generate_v4())
-    vendor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False)
-    vendor_request_id: Mapped[str] = mapped_column(String, nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"))
-    source: Mapped[str] = mapped_column(CampaignSourceEnum, default="vendor_ui", nullable=False)
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict, nullable=False)
-    expected_calls: Mapped[int | None] = mapped_column(Integer)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+Logic:
 
-    __table_args__ = (UniqueConstraint("vendor_id", "vendor_request_id"),)
+IF phone OR email repeats → mark as duplicate
+ELSE → unique lead
 
+Also create:
 
-class Lead(Base):
-    __tablename__ = "leads"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.uuid_generate_v4())
-    source: Mapped[str] = mapped_column(LeadSourceEnum, nullable=False)
-    source_ref: Mapped[str | None] = mapped_column(String)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    mobile_number: Mapped[str] = mapped_column(String, nullable=False)
-    email: Mapped[str | None] = mapped_column(String)
-    custom_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+is_duplicate = true/false
 
+👉 Supabase can handle this via queries easily.
 
-class CallLog(Base):
-    __tablename__ = "call_logs"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.uuid_generate_v4())
-    vendor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("vendors.id", ondelete="CASCADE"), nullable=False)
-    vendor_call_id: Mapped[str] = mapped_column(String, nullable=False)
-    campaign_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="SET NULL"))
-    agent_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"))
-    lead_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("leads.id", ondelete="SET NULL"))
+2. Lead Classification Engine
 
-    callee_name: Mapped[str | None] = mapped_column(String)
-    mobile_number: Mapped[str | None] = mapped_column(String)
-    from_phone_number: Mapped[str | None] = mapped_column(String)
-    language: Mapped[str | None] = mapped_column(String)
+Automatically tag:
 
-    status: Mapped[str] = mapped_column(CallStatusEnum, default="UNKNOWN", nullable=False)
-    lifecycle_status: Mapped[str] = mapped_column(CallStatusEnum, default="UNKNOWN", nullable=False)
-    engagement_status: Mapped[str] = mapped_column(EngagementEnum, default="UNKNOWN", nullable=False)
-    answered_by: Mapped[str] = mapped_column(AnsweredByEnum, default="UNKNOWN", nullable=False)
-    call_ended_by: Mapped[str] = mapped_column(EndedByEnum, default="UNKNOWN", nullable=False)
+Exam category:
+UPSC
+SSC
+Banking
+Teaching (Assistant Professor)
+Lead Intent:
+High (filled full details)
+Medium
+Low (partial info)
+3. Dashboard (THIS is your main product)
 
-    duration_seconds: Mapped[float | None] = mapped_column(Numeric(10, 2))
-    duration_minutes: Mapped[float | None] = mapped_column(Numeric(10, 2))
-    user_speech_duration: Mapped[float | None] = mapped_column(Numeric(10, 2))
+Build a simple frontend (even in React or no-code first)
 
-    max_retries: Mapped[int] = mapped_column(Integer, default=0)
-    retry_count: Mapped[int] = mapped_column(Integer, default=0)
-    retries_left: Mapped[int] = mapped_column(Integer, default=0)
+Key Widgets:
+📊 Total Leads
+Total
+Unique
+Duplicate %
+🎯 Exam Distribution
+% of users per exam
+📈 Lead Source Performance
+Which lead magnet generated most leads
+🔥 Quality Segmentation
+Hot / Warm / Cold
+📅 Trend Graph
+Leads over time
+📊 Example Visualization Layout
+-----------------------------------
+| Total Leads | Unique | Duplicate |
+-----------------------------------
 
-    recording_url: Mapped[str | None] = mapped_column(Text)
+| Exam Split (Pie Chart)          |
+| UPSC | SSC | Teaching | Banking |
 
-    custom_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    result: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    raw_payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+-----------------------------------
 
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    vendor_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+| Lead Magnet Performance         |
+| Pathfinder | Workshop | Ads     |
 
-    __table_args__ = (
-        UniqueConstraint("vendor_id", "vendor_call_id"),
-        Index("idx_calls_vendor_started", "vendor_id", "started_at"),
-    )
+-----------------------------------
 
+| Suggested Actions               |
+| → Run Teaching Workshop        |
+| → Focus on SSC next            |
+-----------------------------------
+🧠 MOST IMPORTANT: Decision Engine (your edge)
 
-class SyncRun(Base):
-    __tablename__ = "sync_runs"
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.uuid_generate_v4())
-    vendor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("vendors.id", ondelete="CASCADE"))
-    job_type: Mapped[str] = mapped_column(SyncJobEnum, nullable=False)
-    status: Mapped[str] = mapped_column(SyncStatusEnum, default="running", nullable=False)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    records_seen: Mapped[int] = mapped_column(Integer, default=0)
-    records_upserted: Mapped[int] = mapped_column(Integer, default=0)
-    high_water_mark: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    error_message: Mapped[str | None] = mapped_column(Text)
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSONB, default=dict, nullable=False)
+This is where you become different.
+
+Add simple logic:
+
+Example Rules:
+If >40% leads = Assistant Professor
+→ Suggest: Run workshop on Assistant Professor
+If duplicates > 30%
+→ Fix lead funnel (quality issue)
+If one lead magnet drives 70% leads
+→ Double down on it
+🔁 Flow of Your System
+User fills form →
+Data goes to Supabase →
+Cleaning + tagging →
+Dashboard updates →
+Insights generated →
+You decide next action
+🚀 What I Recommend You Do Next (VERY PRACTICAL)
+
+Start lean. Don’t overbuild.
+
+Step 1 (Day 1-2)
+Set up Supabase tables
+Add duplicate detection
+Step 2 (Day 3-4)
+Build basic dashboard (even with:
+Retool
+Metabase
+or simple React)
+Step 3 (Day 5-6)
+Add exam segmentation + charts
+Step 4 (Day 7)
+Add decision logic (rules)
+⚠️ Where You’re Slightly Off
+
+You’re thinking:
+
+“I want a tool that tells me everything automatically”
+
+Reality:
+
+First build visibility
+Then build intelligence
+Then build automation
+
+If you jump directly to “outcomes,” you’ll build something messy.
+
+💡 Final Thought (important)
+
+Right now your product is:
+
+👉 “Lead Collector”
+
+You need to evolve it into:
+
+👉 “Demand Intelligence Engine for Exams”
+
+That’s 10x more valuable — especially in EdTech.
+
+If you want, next step I can:
+
+Design exact database schema + queries
+OR give you UI wireframe (proper product level)
+OR help you turn this into a full SaaS idea
+
+Just tell me 👍
