@@ -54,6 +54,54 @@ export type HourBucket = {
   engagement_rate: number;
   interest_rate: number;
 };
+
+export type DowBucket = {
+  dow: number;          // 1=Mon ... 7=Sun
+  dow_name: string;
+  total_calls: number;
+  connected_calls: number;
+  engaged_calls: number;
+  interested_calls: number;
+  avg_duration_seconds: number;
+  connection_rate: number;
+  engagement_rate: number;
+  interest_rate: number;
+};
+
+export type HeatmapCell = {
+  dow: number;
+  dow_name: string;
+  hour: number;
+  total_calls: number;
+  connected_calls: number;
+  engaged_calls: number;
+  interested_calls: number;
+  avg_duration_seconds: number;
+  connection_rate: number;
+  engagement_rate: number;
+  interest_rate: number;
+};
+
+export type VendorHourSplit = {
+  vendor_id: string;
+  vendor_name: string;
+  hours: HourBucket[];
+};
+
+export type CampaignHourSplit = {
+  campaign_id: string;
+  campaign_name: string;
+  display_name?: string | null;
+  hours: HourBucket[];
+};
+
+export type HourlyInsights = {
+  hour_breakdown: HourBucket[];
+  dow_breakdown:  DowBucket[];
+  heatmap:        HeatmapCell[];
+  by_vendor:      VendorHourSplit[];
+  by_campaign:    CampaignHourSplit[];
+};
 export type FunnelStage = { stage: string; count: number };
 
 export type VendorRow = {
