@@ -43,6 +43,17 @@ export type OverviewMetrics = {
 };
 
 export type TimeBucket = { bucket: string | null; total: number; connected: number; interested: number };
+export type HourBucket = {
+  hour: number;
+  total_calls: number;
+  connected_calls: number;
+  engaged_calls: number;
+  interested_calls: number;
+  avg_duration_seconds: number;
+  connection_rate: number;
+  engagement_rate: number;
+  interest_rate: number;
+};
 export type FunnelStage = { stage: string; count: number };
 
 export type VendorRow = {
