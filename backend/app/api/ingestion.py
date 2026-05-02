@@ -78,7 +78,16 @@ async def trigger_sheet_import(req: SheetImportRequest, db: AsyncSession = Depen
 # ---------------------------------------------------------------------------
 @router.post("/ingest/push-to-vendor", response_model=TriggerCampaignResponse)
 async def push_leads_to_vendor(req: TriggerCampaignRequest, db: AsyncSession = Depends(get_db)):
-    settings = get_settings()
+    # DISABLED 2026-05-02 — see push_recipients_to_vendor above for rationale.
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "API campaign launching is disabled. Create campaigns in the vendor "
+            "dashboard; this app is read-only."
+        ),
+    )
+
+    settings = get_settings()  # noqa
     vendor = await get_vendor_by_slug(db, req.vendor_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{req.vendor_slug}' not found")
@@ -163,7 +172,21 @@ async def push_leads_to_vendor(req: TriggerCampaignRequest, db: AsyncSession = D
 # ---------------------------------------------------------------------------
 @router.post("/ingest/push-recipients", response_model=TriggerCampaignResponse)
 async def push_recipients_to_vendor(req: PushRecipientsRequest, db: AsyncSession = Depends(get_db)):
-    settings = get_settings()
+    # DISABLED 2026-05-02. API-pushed campaigns don't appear in vendor UIs as
+    # first-class campaigns — they show as loose call submissions, which causes
+    # ambiguity in our analytics. Going forward, all campaigns are created
+    # through the vendor's own UI and we sync them read-only.
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "API campaign launching is disabled. Please create campaigns directly "
+            "in your vendor's dashboard (Hunar / SquadStack); this dashboard is "
+            "now read-only and syncs vendor data automatically."
+        ),
+    )
+
+    # ---- unreachable; kept for reference if we ever re-enable ----
+    settings = get_settings()  # noqa
     vendor = await get_vendor_by_slug(db, req.vendor_slug)
     if not vendor:
         raise HTTPException(status_code=404, detail=f"Vendor '{req.vendor_slug}' not found")
