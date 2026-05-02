@@ -289,14 +289,15 @@ class OutcomeDistribution(BaseModel):
 
 
 class AttemptsRow(BaseModel):
-    attempts: int            # how many calls a single lead received
-    leads: int               # how many unique leads got exactly this many attempts
-    calls_consumed: int      # = attempts * leads (dial volume in this bucket)
-    pct_of_leads: float      # leads / total_leads
-    pct_of_calls: float      # calls_consumed / total_calls
+    attempts: int        # total dial attempts on the lead (retry_count + 1, summed across their rows)
+    leads: int           # unique leads that received exactly this many attempts
+    connected: int       # of those leads, how many ever picked up (HUMAN + COMPLETED)
+    pct_of_leads: float  # leads / total_leads (share of cohort by size)
+    connect_rate: float  # connected / leads (cohort pickup rate)
 
 
 class AttemptsDistribution(BaseModel):
     rows: list[AttemptsRow]
     total_leads: int
+    total_connected: int
     total_calls: int
