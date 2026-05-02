@@ -1,10 +1,10 @@
 'use client';
 import { Bar, ComposedChart, CartesianGrid, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { Megaphone } from 'lucide-react';
+import { Users } from 'lucide-react';
 import { fmt } from '@/lib/api';
-import type { CampaignHourSplit, HourBucket } from '@/types';
+import type { VendorHourSplit, HourBucket } from '@/types';
 
-type Props = { data: CampaignHourSplit[] };
+type Props = { data: VendorHourSplit[] };
 
 function hourLabel(h: number): string {
   if (h === 0) return '12a';
@@ -24,12 +24,12 @@ function fillHours(hours: HourBucket[]): HourBucket[] {
   );
 }
 
-export default function HourByCampaign({ data }: Props) {
+export default function HourByVendor({ data }: Props) {
   if (!data.length) {
     return (
       <div className="card p-5">
-        <h3 className="text-sm font-semibold text-brand-navy mb-1">Hour split by campaign</h3>
-        <div className="text-xs text-surface-500 py-8 text-center">No campaign data in this window.</div>
+        <h3 className="text-sm font-semibold text-brand-navy mb-1">Hour split by vendor</h3>
+        <div className="text-xs text-surface-500 py-8 text-center">No vendor data in this window.</div>
       </div>
     );
   }
@@ -37,46 +37,44 @@ export default function HourByCampaign({ data }: Props) {
   return (
     <div className="card p-5">
       <h3 className="text-sm font-semibold text-brand-navy mb-1 flex items-center gap-1.5">
-        <Megaphone size={14} className="text-brand-pink" />
-        Hour split by campaign (IST)
+        <Users size={14} className="text-brand-pink" />
+        Hour split by vendor (IST)
       </h3>
       <p className="text-xs text-surface-500 mb-4">
-        Top {data.length} campaign{data.length !== 1 ? 's' : ''} by volume. Different audiences answer at different times.
+        One mini-chart per vendor. Spots whether vendors peak at different hours.
       </p>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {data.map(c => {
-          const filled = fillHours(c.hours);
+      <div className={`grid grid-cols-1 ${data.length >= 2 ? 'md:grid-cols-2' : ''} gap-4`}>
+        {data.map(v => {
+          const filled = fillHours(v.hours);
           const rows = filled.map(b => ({
             hour: hourLabel(b.hour),
             Total: b.total_calls,
             'Conn %': +(b.connection_rate * 100).toFixed(1),
           }));
-          const totalCalls = c.hours.reduce((s, b) => s + b.total_calls, 0);
-          const peak = [...c.hours].filter(h => h.total_calls >= 20)
+          const totalCalls = v.hours.reduce((s, b) => s + b.total_calls, 0);
+          const peak = [...v.hours].filter(h => h.total_calls >= 30)
             .sort((a, b) => b.connection_rate - a.connection_rate)[0];
 
           return (
-            <div key={c.campaign_id} className="bg-surface-50 rounded-lg p-3 border border-surface-100">
-              <div className="mb-2">
-                <div className="text-xs font-medium text-brand-navy line-clamp-2 leading-snug">
-                  {c.display_name || c.campaign_name}
-                </div>
-                <div className="text-[10px] text-surface-500 mt-0.5">
+            <div key={v.vendor_id} className="bg-surface-50 rounded-lg p-3 border border-surface-100">
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="text-sm font-medium text-brand-navy">{v.vendor_name}</div>
+                <div className="text-[11px] text-surface-500">
                   {fmt.int(totalCalls)} calls
                   {peak && ` · peak ${hourLabel(peak.hour)} (${fmt.pct(peak.connection_rate)})`}
                 </div>
               </div>
-              <div className="h-36">
+              <div className="h-44">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={rows} margin={{ top: 2, right: 2, left: -25, bottom: 0 }}>
+                  <ComposedChart data={rows} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#E5E8EE" />
-                    <XAxis dataKey="hour" tick={{ fontSize: 8, fill: '#6B7280' }} interval={3} />
-                    <YAxis yAxisId="left" tick={{ fontSize: 8, fill: '#6B7280' }} />
-                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 8, fill: '#6B7280' }} unit="%" />
+                    <XAxis dataKey="hour" tick={{ fontSize: 9, fill: '#6B7280' }} interval={2} />
+                    <YAxis yAxisId="left" tick={{ fontSize: 9, fill: '#6B7280' }} />
+                    <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 9, fill: '#6B7280' }} unit="%" />
                     <Tooltip contentStyle={{ borderRadius: 8, border: '1px solid #E5E8EE', fontSize: 11 }} />
                     <Bar yAxisId="left" dataKey="Total" fill="#1B1A36" radius={[2, 2, 0, 0]} />
-                    <Line yAxisId="right" dataKey="Conn %" stroke="#E8345C" strokeWidth={1.5} dot={{ r: 2 }} />
+                    <Line yAxisId="right" dataKey="Conn %" stroke="#E8345C" strokeWidth={2} dot={{ r: 2 }} />
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
