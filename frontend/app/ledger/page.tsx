@@ -1,10 +1,10 @@
 'use client';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { format, formatDistanceToNow } from 'date-fns';
 import {
   ScrollText, Plus, X, Trash2, Edit3, ChevronDown, AlertCircle,
-  ListPlus, Megaphone, FileText, Settings,
+  ListPlus, Megaphone, FileText, Settings, Sparkles,
 } from 'lucide-react';
 
 import { api, fmt } from '@/lib/api';
@@ -13,6 +13,7 @@ import {
   type LedgerEntry,
   type LedgerEntryType,
   type LedgerEntryInput,
+  type PendingCampaign,
 } from '@/types';
 
 // Type → human label + icon + tone
@@ -37,6 +38,10 @@ export default function LedgerPage() {
   const [page, setPage] = useState(1);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<LedgerEntry | null>(null);
+  // When the user clicks a pending-campaign chip, we open the form pre-linked
+  // to that campaign. `prefill` carries the seed values; null means a clean
+  // form (e.g. plain "+ New entry" button click).
+  const [prefill, setPrefill] = useState<Partial<LedgerEntryInput> | null>(null);
 
   const list = useQuery({
     queryKey: ['ledger', typeFilter, page],
@@ -47,17 +52,40 @@ export default function LedgerPage() {
     }),
   });
 
+  const pending = useQuery({
+    queryKey: ['ledger-pending'],
+    queryFn: () => api.ledgerPendingCampaigns(30),
+  });
+
   const totalPages = list.data ? Math.max(1, Math.ceil(list.data.total / list.data.page_size)) : 1;
 
   const deleteEntry = useMutation({
     mutationFn: (id: string) => api.ledgerDelete(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['ledger'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+      qc.invalidateQueries({ queryKey: ['ledger-pending'] });
+    },
   });
 
   const handleDelete = (entry: LedgerEntry) => {
-    // No undo — but these are notes, not data. Confirm and move on.
     if (!confirm(`Delete "${entry.title}"? This can't be undone.`)) return;
     deleteEntry.mutate(entry.id);
+  };
+
+  const openFormForCampaign = (c: PendingCampaign) => {
+    setEditing(null);
+    setPrefill({
+      entry_type: 'leads_given',
+      title: `${c.vendor_name} — ${c.campaign_name}`,
+      vendor_id: c.vendor_id,
+      campaign_id: c.campaign_id,
+      // Seed leads_unique from live data so the field is populated immediately.
+      // The form will also re-fetch when the campaign is changed; this is just
+      // a faster initial paint.
+      leads_unique: c.unique_leads || null,
+      leads_total: c.total_calls || null,
+    });
+    setShowForm(true);
   };
 
   return (
@@ -74,21 +102,34 @@ export default function LedgerPage() {
           </p>
         </div>
         <button
-          onClick={() => { setEditing(null); setShowForm(s => !s); }}
+          onClick={() => { setEditing(null); setPrefill(null); setShowForm(s => !s); }}
           className="btn bg-brand-pink text-white hover:bg-[#d92853] shrink-0"
         >
           <Plus size={14} /> <span className="hidden sm:inline">New entry</span>
         </button>
       </header>
 
+      {/* Pending-campaigns banner — surfaces campaigns that exist in the DB
+          but have no journal entry yet. Click a chip to open the form
+          pre-linked to that campaign with leads_unique already populated. */}
+      {pending.data && pending.data.total > 0 && (
+        <PendingBanner
+          items={pending.data.items}
+          onPick={openFormForCampaign}
+        />
+      )}
+
       {(showForm || editing) && (
         <EntryForm
           initial={editing || undefined}
-          onClose={() => { setShowForm(false); setEditing(null); }}
+          prefill={prefill || undefined}
+          onClose={() => { setShowForm(false); setEditing(null); setPrefill(null); }}
           onSaved={() => {
             setShowForm(false);
             setEditing(null);
+            setPrefill(null);
             qc.invalidateQueries({ queryKey: ['ledger'] });
+            qc.invalidateQueries({ queryKey: ['ledger-pending'] });
           }}
         />
       )}
@@ -153,6 +194,67 @@ export default function LedgerPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- Pending-campaigns banner ----------
+// Campaigns that exist but have no ledger entry yet — every campaign deserves
+// a journal note, so we surface the gap loudly. Clicking a chip opens the
+// New Entry form pre-linked to that campaign.
+function PendingBanner({
+  items, onPick,
+}: { items: PendingCampaign[]; onPick: (c: PendingCampaign) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const visible = expanded ? items : items.slice(0, 3);
+  const more = items.length - visible.length;
+
+  return (
+    <div className="card p-3 md:p-4 border-amber-200 bg-amber-50">
+      <div className="flex items-start gap-2.5">
+        <AlertCircle size={16} className="text-amber-600 mt-0.5 shrink-0" />
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold text-amber-900">
+            {items.length} campaign{items.length === 1 ? '' : 's'} without a log entry
+          </div>
+          <div className="text-xs text-amber-800/80 mt-0.5">
+            Click a campaign to log it — leads sent will auto-fill from live data.
+          </div>
+
+          <div className="flex flex-wrap gap-1.5 mt-2.5">
+            {visible.map(c => (
+              <button
+                key={c.campaign_id}
+                onClick={() => onPick(c)}
+                className="group inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-white border border-amber-300 hover:border-amber-500 hover:bg-amber-100 transition-colors text-left max-w-full"
+                title={`${c.vendor_name} · ${c.campaign_name}`}
+              >
+                <span className="text-[11px] font-medium text-amber-900 truncate">
+                  {c.vendor_name} · {c.campaign_name.length > 28 ? c.campaign_name.slice(0, 28) + '…' : c.campaign_name}
+                </span>
+                {c.unique_leads > 0 && (
+                  <span className="text-[10px] tabular-nums text-amber-700 bg-amber-100 px-1 rounded shrink-0">
+                    {fmt.int(c.unique_leads)} unique
+                  </span>
+                )}
+                {c.started_at && (
+                  <span className="text-[10px] text-amber-700/70 shrink-0">
+                    {c.started_at.slice(0, 10)}
+                  </span>
+                )}
+              </button>
+            ))}
+            {more > 0 && (
+              <button
+                onClick={() => setExpanded(true)}
+                className="text-[11px] text-amber-700 hover:text-amber-900 underline px-2 py-1.5"
+              >
+                + {more} more
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -286,27 +388,75 @@ function Stat({ label, value, accent }: { label: string; value: string; accent?:
 
 // ---------- Form ----------
 function EntryForm({
-  initial, onClose, onSaved,
-}: { initial?: LedgerEntry; onClose: () => void; onSaved: () => void }) {
+  initial, prefill, onClose, onSaved,
+}: {
+  initial?: LedgerEntry;
+  prefill?: Partial<LedgerEntryInput>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
   const isEdit = !!initial;
   const vendorsQ = useQuery({ queryKey: ['vendors'], queryFn: api.vendors });
   const campaignsQ = useQuery({ queryKey: ['campaigns'], queryFn: api.campaigns });
 
   const [form, setForm] = useState<LedgerEntryInput>({
-    entry_type: (initial?.entry_type as LedgerEntryType) || 'leads_given',
-    title: initial?.title || '',
+    entry_type: (initial?.entry_type as LedgerEntryType) || prefill?.entry_type || 'leads_given',
+    title: initial?.title || prefill?.title || '',
     occurred_at: initial?.occurred_at,
-    vendor_id: initial?.vendor_id || null,
-    campaign_id: initial?.campaign_id || null,
-    leads_total: initial?.leads_total ?? null,
-    leads_unique: initial?.leads_unique ?? null,
+    vendor_id: initial?.vendor_id ?? prefill?.vendor_id ?? null,
+    campaign_id: initial?.campaign_id ?? prefill?.campaign_id ?? null,
+    leads_total: initial?.leads_total ?? prefill?.leads_total ?? null,
+    leads_unique: initial?.leads_unique ?? prefill?.leads_unique ?? null,
     notes: initial?.notes || null,
   });
   const [error, setError] = useState<string | null>(null);
+  // Track which numeric fields the user has typed into manually. Pre-existing
+  // values from a saved entry (`initial`) count as touched — we don't want to
+  // overwrite what someone deliberately saved. Pre-filled values from a chip
+  // click do NOT count — they came from the same auto-fetch source the
+  // useEffect will use, so it's fine to refresh them when campaign changes.
+  const [touched, setTouched] = useState<{ total: boolean; unique: boolean }>({
+    total: initial?.leads_total != null,
+    unique: initial?.leads_unique != null,
+  });
+  // Tag fields auto-filled from campaign data so we can surface a small
+  // "(auto)" hint and explain where the number came from.
+  const [autofilled, setAutofilled] = useState<{ total: boolean; unique: boolean }>({
+    total: !initial && prefill?.leads_total != null,
+    unique: !initial && prefill?.leads_unique != null,
+  });
 
   const visibleCampaigns = (campaignsQ.data || []).filter(
     c => !form.vendor_id || c.vendor_id === form.vendor_id
   );
+
+  // When the campaign changes (and isn't being edited from a saved entry),
+  // pull live stats so unique/total leads auto-populate. Skip when the user
+  // has already typed into either field — we don't clobber their input.
+  useEffect(() => {
+    if (isEdit) return;                  // editing: respect what's saved
+    if (!form.campaign_id) return;       // nothing to fetch
+    let cancelled = false;
+    (async () => {
+      try {
+        const stats = await api.ledgerCampaignStats(form.campaign_id!);
+        if (cancelled) return;
+        setForm(prev => ({
+          ...prev,
+          leads_unique: touched.unique ? prev.leads_unique : (stats.unique_leads || null),
+          leads_total:  touched.total  ? prev.leads_total  : (stats.total_calls || null),
+        }));
+        setAutofilled({
+          unique: !touched.unique && stats.unique_leads > 0,
+          total:  !touched.total  && stats.total_calls > 0,
+        });
+      } catch {
+        // Silent — campaign might be too new for stats; user can type manually.
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.campaign_id]);
 
   const submit = async () => {
     setError(null);
@@ -326,8 +476,6 @@ function EntryForm({
     }
   };
 
-  // The leads_total/unique fields only make sense for "leads_given" entries —
-  // hide them otherwise to keep the form focused.
   const showLeadsCounts = form.entry_type === 'leads_given';
 
   return (
@@ -406,23 +554,45 @@ function EntryForm({
         {showLeadsCounts && (
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <Label>Leads sent (total)</Label>
+              <Label>
+                Leads sent (total)
+                {autofilled.total && !touched.total && (
+                  <span className="ml-1.5 inline-flex items-center gap-0.5 text-[10px] font-normal text-brand-pink">
+                    <Sparkles size={10} /> auto
+                  </span>
+                )}
+              </Label>
               <input
                 type="number"
                 min={0}
                 value={form.leads_total ?? ''}
-                onChange={e => setForm({ ...form, leads_total: e.target.value === '' ? null : Number(e.target.value) })}
+                onChange={e => {
+                  setTouched(t => ({ ...t, total: true }));
+                  setAutofilled(a => ({ ...a, total: false }));
+                  setForm({ ...form, leads_total: e.target.value === '' ? null : Number(e.target.value) });
+                }}
                 className="w-full px-3 py-2 rounded-lg border border-surface-300 text-sm tabular-nums"
                 placeholder="500"
               />
             </div>
             <div>
-              <Label>Leads sent (unique)</Label>
+              <Label>
+                Leads sent (unique)
+                {autofilled.unique && !touched.unique && (
+                  <span className="ml-1.5 inline-flex items-center gap-0.5 text-[10px] font-normal text-brand-pink">
+                    <Sparkles size={10} /> auto
+                  </span>
+                )}
+              </Label>
               <input
                 type="number"
                 min={0}
                 value={form.leads_unique ?? ''}
-                onChange={e => setForm({ ...form, leads_unique: e.target.value === '' ? null : Number(e.target.value) })}
+                onChange={e => {
+                  setTouched(t => ({ ...t, unique: true }));
+                  setAutofilled(a => ({ ...a, unique: false }));
+                  setForm({ ...form, leads_unique: e.target.value === '' ? null : Number(e.target.value) });
+                }}
                 className="w-full px-3 py-2 rounded-lg border border-surface-300 text-sm tabular-nums"
                 placeholder="487"
               />
