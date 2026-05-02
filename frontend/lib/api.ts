@@ -1,6 +1,6 @@
 import type {
   Agent, AgentPerformanceRow, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
-  FunnelStage, HourBucket, HourlyInsights, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
+  FunnelStage, HourBucket, HourlyInsights, OutcomeDistribution, OverviewMetrics, TimeBucket, TriggerCampaignRequest, TriggerCampaignResponse,
   Vendor, VendorRow,
 } from '@/types';
 
@@ -36,6 +36,8 @@ export const api = {
     jget<VendorRow[]>(`/api/overview/vendor-comparison?${buildQuery(f)}`),
   hourly: (f: Filters) =>
     jget<HourBucket[]>(`/api/overview/hourly?${buildQuery(f)}`),
+  outcomes: (f: Filters) =>
+    jget<OutcomeDistribution>(`/api/overview/outcomes?${buildQuery(f)}`),
   hourlyInsights: (f: Filters) =>
     jget<HourlyInsights>(`/api/hourly/insights?${buildQuery(f)}`),
   campaignBreakdown: (f: Filters) =>
