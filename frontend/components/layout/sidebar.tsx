@@ -14,10 +14,11 @@ const NAV = [
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
 ];
 
+// Desktop sidebar. Hidden on viewports below lg (1024px) — those use MobileNav.
 export default function Sidebar() {
   const pathname = usePathname();
   return (
-    <aside className="w-64 shrink-0 bg-black text-white min-h-screen flex flex-col">
+    <aside className="hidden lg:flex w-64 shrink-0 bg-black text-white min-h-screen flex-col sticky top-0 h-screen">
       <div className="p-5 border-b border-white/10">
         <Image
           src="/logo-light.png"
@@ -30,7 +31,7 @@ export default function Sidebar() {
         <p className="text-xs text-white/60 mt-3 leading-tight">AI Calling Analytics</p>
       </div>
 
-      <nav className="flex-1 py-4 px-3">
+      <nav className="flex-1 py-4 px-3 overflow-y-auto">
         {NAV.map(item => {
           const active = pathname === item.href;
           const Icon = item.icon;
