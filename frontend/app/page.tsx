@@ -34,6 +34,7 @@ function buildCallsLink(filters: Filters, params: Record<string, string>): strin
 // Tooltip definitions for every metric — show what it means + how it's computed
 const T = {
   total:      'Every call attempted in this window — scheduled, dialed, completed, or failed. The denominator for everything else.',
+  uniqueLeads: 'Distinct mobile numbers dialed. The same person called 3 times = 1 lead. Use this to gauge real reach (vs total dial attempts) — and to spot retry waste.',
   connected:  'Calls where a human picked up AND completed. Excludes voicemail/IVR pickups (machine answers) and dropped calls.',
   interested: 'Connected calls where the prospect signaled HIGH or MEDIUM interest. Pulled from Hunar\'s interest_level field on call result.',
   conversion: 'Interested ÷ Total. The end-to-end funnel ratio — what % of all attempts produced a hot lead.',
@@ -68,13 +69,20 @@ export default function OverviewPage() {
 
       <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
 
-      {/* Row 1 — top-line outcomes */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      {/* Row 1 — volume → outcome pipeline */}
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
         <MetricCard
           label="Total calls"
           value={metrics.data ? fmt.int(metrics.data.total_calls) : '—'}
+          hint={metrics.data && metrics.data.unique_leads ? `${metrics.data.attempts_per_lead.toFixed(2)} attempts/lead` : undefined}
           tooltip={T.total}
           accent
+        />
+        <MetricCard
+          label="Unique leads"
+          value={metrics.data ? fmt.int(metrics.data.unique_leads) : '—'}
+          hint={metrics.data ? `${fmt.int(metrics.data.unique_connected_leads)} reached, ${fmt.int(metrics.data.unique_interested_leads)} interested` : undefined}
+          tooltip={T.uniqueLeads}
         />
         <MetricCard
           label="Connected"
@@ -92,7 +100,7 @@ export default function OverviewPage() {
         <MetricCard
           label="Conversion"
           value={metrics.data ? fmt.pct(metrics.data.conversion_rate) : '—'}
-          hint={metrics.data ? `${fmt.int(metrics.data.interested_calls)} interested / ${fmt.int(metrics.data.total_calls)} dialed` : undefined}
+          hint={metrics.data && metrics.data.unique_leads ? `Lead-based: ${fmt.pct(metrics.data.lead_conversion_rate)}` : undefined}
           tooltip={T.conversion}
         />
       </div>
