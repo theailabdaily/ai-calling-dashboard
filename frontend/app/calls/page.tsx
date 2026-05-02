@@ -2,7 +2,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useSearchParams } from 'next/navigation';
 import { Search, Volume2, ChevronLeft, ChevronRight, Star, AlertCircle } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 
 import FilterBar from '@/components/filters/filter-bar';
@@ -22,7 +22,6 @@ function defaultFilters(): Filters {
   };
 }
 
-// Parse Filters from URL search params if present
 function filtersFromUrl(sp: URLSearchParams): Filters {
   const base = defaultFilters();
   const startStr = sp.get('start');
@@ -38,10 +37,14 @@ function filtersFromUrl(sp: URLSearchParams): Filters {
   return base;
 }
 
-export default function CallsPage() {
+// Inner component owns all client state. It's the one that calls useSearchParams,
+// so it has to live inside <Suspense>. The exported default just wires that up.
+function CallsPageInner() {
   const searchParams = useSearchParams();
 
-  const [filters, setFilters] = useState<Filters>(() => filtersFromUrl(new URLSearchParams(searchParams.toString())));
+  const [filters, setFilters] = useState<Filters>(() =>
+    filtersFromUrl(new URLSearchParams(searchParams.toString()))
+  );
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -50,7 +53,6 @@ export default function CallsPage() {
   const [failedOnly, setFailedOnly] = useState(searchParams.get('failed_only') === 'true');
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
 
-  // If URL params change (e.g. user follows another deep link), pick them up
   useEffect(() => {
     setOnlyInterested(searchParams.get('only_interested') === 'true');
     setFailedOnly(searchParams.get('failed_only') === 'true');
@@ -58,7 +60,6 @@ export default function CallsPage() {
     setPage(1);
   }, [searchParams]);
 
-  // Debounce search
   if (search !== debouncedSearch) {
     setTimeout(() => setDebouncedSearch(search), 300);
   }
@@ -81,7 +82,6 @@ export default function CallsPage() {
 
   const totalPages = calls.data ? Math.max(1, Math.ceil(calls.data.total / calls.data.page_size)) : 1;
 
-  // Banner shown when user lands here via a deep link with active filters
   const activeDeepFilter =
     failedOnly ? { label: 'Failed calls only', clear: () => setFailedOnly(false) } :
     onlyInterested ? { label: 'Interested calls only', clear: () => setOnlyInterested(false) } :
@@ -115,7 +115,6 @@ export default function CallsPage() {
 
       <InsightsPanel insights={insights} subtitle="Patterns from the calls visible right now" />
 
-      {/* Search + toggles row */}
       <div className="card p-4 flex flex-wrap items-center gap-3">
         <div className="relative flex-1 min-w-[260px]">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-500" />
@@ -152,7 +151,6 @@ export default function CallsPage() {
         </span>
       </div>
 
-      {/* Calls table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -213,7 +211,6 @@ export default function CallsPage() {
           </table>
         </div>
 
-        {/* Pagination */}
         <div className="px-5 py-3 border-t border-surface-200 flex items-center justify-between text-xs">
           <span className="text-surface-500">
             Page {page} of {totalPages}
@@ -239,5 +236,30 @@ export default function CallsPage() {
 
       <CallDetailDrawer callId={selectedCallId} onClose={() => setSelectedCallId(null)} />
     </div>
+  );
+}
+
+// Lightweight loading skeleton shown during the initial SSR pass + while
+// useSearchParams suspends. Matches the page's general shape so it doesn't
+// flash a blank screen.
+function CallsPageSkeleton() {
+  return (
+    <div className="p-6 space-y-5 max-w-[1400px]">
+      <header>
+        <h1 className="text-2xl font-semibold text-brand-navy">Call logs</h1>
+        <p className="text-sm text-surface-500 mt-1">Loading…</p>
+      </header>
+      <div className="card p-4 h-16 animate-pulse bg-surface-100" />
+      <div className="card p-4 h-32 animate-pulse bg-surface-100" />
+      <div className="card p-4 h-96 animate-pulse bg-surface-100" />
+    </div>
+  );
+}
+
+export default function CallsPage() {
+  return (
+    <Suspense fallback={<CallsPageSkeleton />}>
+      <CallsPageInner />
+    </Suspense>
   );
 }
