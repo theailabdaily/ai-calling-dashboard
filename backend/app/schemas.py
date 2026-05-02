@@ -59,6 +59,12 @@ class OverviewMetrics(BaseModel):
     interest_rate: float
     follow_up_rate: float
     conversion_rate: float
+    # Lead-level metrics — additive, do not change call-based rates above
+    unique_leads: int = 0
+    unique_connected_leads: int = 0
+    unique_interested_leads: int = 0
+    attempts_per_lead: float = 0.0
+    lead_conversion_rate: float = 0.0
 
 
 class TimeBucket(BaseModel):
@@ -144,6 +150,9 @@ class VendorRow(BaseModel):
     engagement_rate: float
     interest_rate: float
     follow_up_rate: float
+    # Lead-level — additive
+    unique_leads: int = 0
+    attempts_per_lead: float = 0.0
 
 
 class CampaignRow(BaseModel):
