@@ -18,6 +18,14 @@ from app.models import Agent, CallLog, Campaign, Vendor
 logger = logging.getLogger(__name__)
 
 
+# Hard exclusion list. Any call whose vendor_request_id matches an entry here is
+# silently dropped by upsert_call — used to retire test/duplicate API submissions
+# whose webhooks would otherwise keep resurrecting deleted rows.
+EXCLUDED_VENDOR_REQUEST_IDS: set[str] = {
+    "campaign_f81ddc0a4a32462d",  # 2026-05-02 — API push duplicated via Hunar UI campaign
+}
+
+
 async def get_vendor_by_slug(db: AsyncSession, slug: str) -> Vendor | None:
     res = await db.execute(select(Vendor).where(Vendor.slug == slug))
     return res.scalar_one_or_none()
@@ -110,7 +118,11 @@ async def _agent_id_for(db: AsyncSession, vendor_id: UUID, vendor_agent_id: str 
 # ---------------------------------------------------------------------------
 # Calls
 # ---------------------------------------------------------------------------
-async def upsert_call(db: AsyncSession, vendor_id: UUID, n: NormalizedCall) -> UUID:
+async def upsert_call(db: AsyncSession, vendor_id: UUID, n: NormalizedCall) -> UUID | None:
+    if n.vendor_request_id and n.vendor_request_id in EXCLUDED_VENDOR_REQUEST_IDS:
+        logger.debug("skipping excluded request_id=%s call_id=%s", n.vendor_request_id, n.vendor_call_id)
+        return None
+
     agent_id = await _agent_id_for(db, vendor_id, n.vendor_agent_id)
 
     campaign_id: UUID | None = None
