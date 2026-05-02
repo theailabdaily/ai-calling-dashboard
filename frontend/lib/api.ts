@@ -53,6 +53,10 @@ export const api = {
     only_with_recording?: boolean; only_interested?: boolean;
     funnel_stage?: string;
     failed_only?: boolean;
+    sort_by?: 'when' | 'duration' | 'status';
+    sort_order?: 'asc' | 'desc';
+    status?: string;
+    answered_by?: string;
   }): Promise<CallListPage> => {
     const q = new URLSearchParams(buildQuery(params.f));
     if (params.page) q.set('page', String(params.page));
@@ -64,6 +68,8 @@ export const api = {
     if (params.only_interested) q.set('only_interested', 'true');
     if (params.funnel_stage) q.set('funnel_stage', params.funnel_stage);
     if (params.failed_only) q.set('failed_only', 'true');
+    if (params.sort_by) q.set('sort_by', params.sort_by);
+    if (params.sort_order) q.set('sort_order', params.sort_order);
     return jget<CallListPage>(`/api/calls?${q.toString()}`);
   },
   callDetail: (id: string) => jget<CallDetail>(`/api/calls/${id}`),
