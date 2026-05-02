@@ -1,11 +1,13 @@
 """Activity log / ledger — operational journal for the marketing team.
 
-GET /api/ledger              — paginated list, filterable by type/vendor/date
-POST /api/ledger             — create a new entry
-PATCH /api/ledger/{id}       — partial update
-DELETE /api/ledger/{id}      — hard delete (cheap — these are audit notes,
-                                rare to delete; if soft-delete becomes a
-                                requirement we add a deleted_at column)
+GET /api/ledger                          — paginated list, filterable
+GET /api/ledger/pending-campaigns        — campaigns with no ledger entry yet
+GET /api/ledger/campaign-stats/{id}      — live stats for a single campaign
+                                           (used by the form to auto-fill
+                                           unique-leads when a campaign is picked)
+POST /api/ledger                         — create a new entry
+PATCH /api/ledger/{id}                   — partial update
+DELETE /api/ledger/{id}                  — hard delete
 
 When an entry has campaign_id set, the response includes a `live_stats` block
 joined from call_logs so the UI can show "you logged 500 leads sent →
@@ -13,12 +15,12 @@ vendor dialed 487 → connected 152" in one row.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, case, func, literal, select
+from sqlalchemy import and_, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -30,6 +32,8 @@ from app.schemas import (
     LedgerEntryUpdate,
     LedgerListResponse,
     LedgerLiveStats,
+    PendingCampaign,
+    PendingCampaignsResponse,
 )
 
 router = APIRouter(prefix="/api/ledger", tags=["ledger"])
@@ -116,7 +120,93 @@ async def _serialize(db: AsyncSession, entry: LedgerEntry) -> LedgerEntryOut:
 
 
 # ---------------------------------------------------------------------------
-# Routes
+# Specific GETs first — must come before /{entry_id} catch-alls in case we
+# ever add a GET-by-id endpoint. Keeps router precedence unambiguous.
+# ---------------------------------------------------------------------------
+@router.get("/pending-campaigns", response_model=PendingCampaignsResponse)
+async def pending_campaigns(
+    days: int = Query(30, ge=1, le=365, description="only flag campaigns newer than this"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Campaigns that exist but have no ledger entry attached yet.
+
+    The marketing team's contract is: every campaign should have at least
+    one journal entry (typically a 'leads_given' or 'campaign_created').
+    Anything without one is operational debt — surface it loudly.
+
+    We cap to the last N days because pre-history campaigns aren't worth
+    backfilling notes for.
+    """
+    # Subquery: campaign_ids that already appear in any ledger entry
+    logged = (
+        select(LedgerEntry.campaign_id)
+        .where(LedgerEntry.campaign_id.isnot(None))
+        .subquery()
+    )
+
+    # Aggregate live stats per campaign in one go — avoids N+1 when there are
+    # many pending. We only need unique_leads + total_calls for the form's
+    # auto-fill; the full LedgerLiveStats is overkill here.
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    stmt = (
+        select(
+            Campaign.id,
+            Campaign.name,
+            Campaign.vendor_id,
+            Vendor.name.label("vendor_name"),
+            Campaign.vendor_request_id,
+            Campaign.started_at,
+            Campaign.expected_calls,
+            func.count(CallLog.id).label("total_calls"),
+            func.count(func.distinct(CallLog.mobile_number)).filter(
+                and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != "")
+            ).label("unique_leads"),
+        )
+        .join(Vendor, Vendor.id == Campaign.vendor_id)
+        .outerjoin(CallLog, CallLog.campaign_id == Campaign.id)
+        .where(Campaign.id.notin_(select(logged)))
+        .where(
+            # use started_at when present, else created_at as the cohort filter
+            func.coalesce(Campaign.started_at, Campaign.created_at) >= cutoff
+        )
+        .group_by(
+            Campaign.id, Campaign.name, Campaign.vendor_id, Vendor.name,
+            Campaign.vendor_request_id, Campaign.started_at, Campaign.expected_calls,
+        )
+        .order_by(func.coalesce(Campaign.started_at, Campaign.created_at).desc())
+    )
+
+    rows = (await db.execute(stmt)).all()
+    items = [
+        PendingCampaign(
+            campaign_id=r.id,
+            campaign_name=r.name,
+            vendor_id=r.vendor_id,
+            vendor_name=r.vendor_name,
+            vendor_request_id=r.vendor_request_id,
+            started_at=r.started_at,
+            expected_calls=r.expected_calls,
+            total_calls=int(r.total_calls or 0),
+            unique_leads=int(r.unique_leads or 0),
+        )
+        for r in rows
+    ]
+    return PendingCampaignsResponse(items=items, total=len(items), days=days)
+
+
+@router.get("/campaign-stats/{campaign_id}", response_model=LedgerLiveStats)
+async def campaign_stats(campaign_id: UUID, db: AsyncSession = Depends(get_db)):
+    """Live stats for a single campaign — used by the New Entry form to
+    auto-populate leads_total/leads_unique when the user picks a campaign."""
+    exists = (await db.execute(select(Campaign.id).where(Campaign.id == campaign_id))).scalar_one_or_none()
+    if not exists:
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return await _live_stats_for_campaign(db, campaign_id)
+
+
+# ---------------------------------------------------------------------------
+# List + CRUD
 # ---------------------------------------------------------------------------
 @router.get("", response_model=LedgerListResponse)
 async def list_entries(
@@ -151,11 +241,9 @@ async def list_entries(
 
     where = and_(*conds) if conds else literal(True)
 
-    # Total — for pagination footer
     total_stmt = select(func.count()).select_from(LedgerEntry).where(where)
     total = int((await db.execute(total_stmt)).scalar() or 0)
 
-    # Page of entries
     offset = (page - 1) * page_size
     stmt = (
         select(LedgerEntry)
