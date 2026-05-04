@@ -46,9 +46,32 @@ export const api = {
   campaignBreakdown: (f: Filters) =>
     jget<CampaignRow[]>(`/api/campaigns/breakdown?${buildQuery(f)}`),
 
-  exportCallsUrl: (f: Filters, funnel_stage?: string) => {
-    const q = buildQuery(f);
-    return `${API_BASE}/api/export/calls.csv?${q}${funnel_stage ? `&funnel_stage=${funnel_stage}` : ''}`;
+  // Build the export URL. Mirrors every filter param accepted by /api/calls
+  // so the CSV matches what the user is currently looking at — top-level
+  // filters PLUS in-table filters (search, status, pickup, recording,
+  // interested-only, failed-only, funnel stage). Keep this in sync with
+  // backend/app/api/exports.py and backend/app/api/calls.py.
+  exportCallsUrl: (
+    f: Filters,
+    opts: {
+      search?: string;
+      status?: string;
+      answered_by?: string;
+      only_with_recording?: boolean;
+      only_interested?: boolean;
+      failed_only?: boolean;
+      funnel_stage?: string;
+    } = {},
+  ) => {
+    const q = new URLSearchParams(buildQuery(f));
+    if (opts.search) q.set('search', opts.search);
+    if (opts.status) q.set('status', opts.status);
+    if (opts.answered_by) q.set('answered_by', opts.answered_by);
+    if (opts.only_with_recording) q.set('only_with_recording', 'true');
+    if (opts.only_interested) q.set('only_interested', 'true');
+    if (opts.failed_only) q.set('failed_only', 'true');
+    if (opts.funnel_stage) q.set('funnel_stage', opts.funnel_stage);
+    return `${API_BASE}/api/export/calls.csv?${q.toString()}`;
   },
 
   triggerSync: (slug: string) =>
