@@ -1,18 +1,17 @@
 'use client';
-import { useQuery } from '@tanstack/react-query';
-import { Calendar, ChevronDown, Download } from 'lucide-react';
+import { useQuery, useQueryClient, useIsFetching } from '@tanstack/react-query';
+import { Calendar, ChevronDown, Download, RefreshCw } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Filters } from '@/types';
 
-type PresetKey = 'today' | 'yesterday' | 'last7' | 'last30' | 'last90' | 'ytd' | 'alltime';
+type PresetKey = 'today' | 'yesterday' | 'last7' | 'last30' | 'ytd' | 'alltime';
 
 const PRESETS: { label: string; key: PresetKey }[] = [
   { label: 'Today',     key: 'today' },
   { label: 'Yesterday', key: 'yesterday' },
   { label: 'Last 7d',   key: 'last7' },
   { label: 'Last 30d',  key: 'last30' },
-  { label: 'Last 90d',  key: 'last90' },
   { label: 'YTD',       key: 'ytd' },
   { label: 'All time',  key: 'alltime' },
 ];
@@ -37,9 +36,8 @@ function applyPreset(key: PresetKey): { start: Date; end: Date } {
       return { start: startOfDay(y), end: endOfDay(y) };
     }
     case 'last7':
-    case 'last30':
-    case 'last90': {
-      const days = key === 'last7' ? 7 : key === 'last30' ? 30 : 90;
+    case 'last30': {
+      const days = key === 'last7' ? 7 : 30;
       const start = new Date(now); start.setDate(start.getDate() - days);
       return { start: startOfDay(start), end: endOfDay(now) };
     }
@@ -94,6 +92,29 @@ type OpenPopup = 'vendor' | 'campaign' | null;
 export default function FilterBar({ filters, onChange, onExport }: Props) {
   const [open, setOpen] = useState<OpenPopup>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Refresh button machinery — invalidates every React Query cache so all
+  // tiles, charts, and tables refetch from the API. Doesn't trigger a Hunar
+  // sync (that's the GH Actions cron's job, every 10 min). The "Updated Xs
+  // ago" affordance tells the user what they're really getting.
+  const qc = useQueryClient();
+  const fetching = useIsFetching();   // 0 when idle, >0 while any query is in-flight
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [, forceTick] = useState(0);  // re-render every 10s so "Xs ago" stays current
+  useEffect(() => {
+    const id = setInterval(() => forceTick(n => n + 1), 10_000);
+    return () => clearInterval(id);
+  }, []);
+  const handleRefresh = () => {
+    qc.invalidateQueries();
+    setLastRefresh(new Date());
+  };
+  const secondsAgo = Math.floor((Date.now() - lastRefresh.getTime()) / 1000);
+  const updatedLabel =
+    secondsAgo < 5     ? 'just now' :
+    secondsAgo < 60    ? `${secondsAgo}s ago` :
+    secondsAgo < 3600  ? `${Math.floor(secondsAgo / 60)}m ago` :
+                         `${Math.floor(secondsAgo / 3600)}h ago`;
 
   // Outside-click closes whatever popup is open
   useEffect(() => {
@@ -253,6 +274,20 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
           </div>
         )}
       </div>
+
+      {/* Refresh — invalidates every cached query. While anything is fetching,
+          the icon spins and the button is disabled to prevent double-click
+          stampedes. Title attr shows freshness ("Updated 5s ago") on hover. */}
+      <button
+        onClick={handleRefresh}
+        disabled={fetching > 0}
+        className="btn-outline"
+        title={fetching > 0 ? 'Refreshing…' : `Updated ${updatedLabel}`}
+        aria-label="Refresh data"
+      >
+        <RefreshCw size={14} className={fetching > 0 ? 'animate-spin' : ''} />
+        <span className="hidden sm:inline">{fetching > 0 ? 'Refreshing…' : 'Refresh'}</span>
+      </button>
 
       {onExport && (
         <button onClick={onExport} className="btn-outline">
