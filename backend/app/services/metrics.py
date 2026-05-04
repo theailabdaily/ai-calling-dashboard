@@ -83,6 +83,17 @@ _is_engaged = CallLog.engagement_status == "ENGAGED"
 # next_step_interest: CALLBACK | NONE | UNSURE | "Not Covered" | "NOT AVAILABLE"
 _is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
 _has_follow_up = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
+# Hot lead = either signal of buying intent. Drives the bottom funnel stage
+# and the "Hot leads" tile.
+#
+# Why a UNION not an intersection: in Hunar's data these are independent
+# signals — a lead can ask for a callback without being tagged HIGH/MEDIUM,
+# or vice versa. Treating them as nested ("Interested" then "Follow-up")
+# produced a broken funnel where Follow-up (66) > Interested (57), the funnel
+# went UP, and users got confused. Either signal is sales-positive intent
+# for an EdTech lead, so OR them.
+# By inclusion-exclusion: |hot| = |interested| + |followup| - |both|.
+_is_hot_lead = or_(_is_interested, _has_follow_up)
 
 # Dial-attempts per row: retry_count + 1 (one initial dial + N retries),
 # except a SCHEDULED row that was never dialed (no started_at) contributes 0.
@@ -135,6 +146,11 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged_calls"),
         func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested_calls"),
         func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("follow_up_calls"),
+        # Hot lead = buying-intent signal of any kind, gated on connected.
+        # Drives the funnel's bottom stage. SQL-side OR vs Python max() of
+        # the two counters because a lead can be interested OR followup OR
+        # both, and we don't want to double-count the intersection.
+        func.sum(case((and_(_is_connected, _is_hot_lead), 1), else_=0)).label("hot_lead_calls"),
     )
     stmt = filters.apply(stmt)
     row = (await db.execute(stmt)).one()
@@ -149,9 +165,11 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     engaged = int(row.engaged_calls or 0)
     interested = int(row.interested_calls or 0)
     follow_up = int(row.follow_up_calls or 0)
+    hot_leads = int(row.hot_lead_calls or 0)
 
     return {
         "total_calls": total,                          # 731 — dial attempts
+        "row_count": row_count,                        # 200 — rows in call_logs (= lead-attempts in slice)
         "unique_leads": unique_leads,                  # 200 — distinct phones
         "unique_connected_leads": unique_connected,
         "unique_interested_leads": unique_interested,
@@ -161,12 +179,14 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         "engaged_calls": engaged,
         "interested_calls": interested,
         "follow_up_calls": follow_up,
+        "hot_lead_calls": hot_leads,
         # Rate denominators are LEAD-level (row_count), not dial-level.
         # See module docstring for why per-dial rates aren't computable.
         "connection_rate": _safe_div(connected, row_count),
         "engagement_rate": _safe_div(engaged, connected),
         "interest_rate": _safe_div(interested, connected),
         "follow_up_rate": _safe_div(follow_up, connected),
+        "hot_lead_rate": _safe_div(hot_leads, connected),
         "conversion_rate": _safe_div(interested, row_count),  # v1 proxy
         "lead_conversion_rate": _safe_div(unique_interested, unique_leads),
         # Now actually meaningful: (initial + retries) / leads.
@@ -206,20 +226,100 @@ async def calls_over_time(db: AsyncSession, filters: MetricFilters, bucket: str 
 
 
 # ---------------------------------------------------------------------------
-# Funnel: Total → Connected → Engaged → Interested → Follow-up
+# Funnel: Leads → Connected → Engaged → Hot leads (all lead-level)
 # ---------------------------------------------------------------------------
 async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
+    """Conversion funnel — purely lead-level so each stage is a count of
+    distinct leads (one row per lead in our schema). Mixing dial-attempts
+    at the top with leads below produced misleading drop-off rates
+    (e.g. 250/3050 = 8% looked terrible when the real rate is 250/603 = 41%).
+
+    Stages 2–4 are gated only on `connected` — not on each previous stage.
+    This means Engaged and Hot leads are independent slices of Connected.
+    The numbers happen to nest cleanly in current data (engaged > hot) but
+    we don't ENFORCE nesting because that would hide real edge cases (e.g.
+    a lead who asked for a callback but Hunar marked not-engaged).
+
+    Each stage carries a definition string so the UI can render it inline
+    without hardcoding anything frontend-side. If we change the SQL, the
+    definition text changes with it — single source of truth.
+    """
     m = await compute_overview_metrics(db, filters)
-    return [
-        {"stage": "Total dialed",    "count": m["total_calls"]},
-        {"stage": "Connected",       "count": m["connected_calls"]},
-        {"stage": "Engaged",         "count": m["engaged_calls"]},
-        {"stage": "Interested",      "count": m["interested_calls"]},
-        {"stage": "Follow-up booked","count": m["follow_up_calls"]},
+    # row_count is what we use everywhere below (each row in call_logs is one
+    # lead-attempt in this slice, gated on conditions for connected/engaged/hot).
+    # If we used unique_leads (distinct phones) here, a phone dialed in two
+    # campaigns would count once at top but twice below — drop-off math breaks.
+    # Same denominator basis throughout = honest funnel.
+    leads = int(m.get("row_count") or 0)
+    connected = int(m.get("connected_calls") or 0)
+    engaged = int(m.get("engaged_calls") or 0)
+    hot = int(m.get("hot_lead_calls") or 0)
+
+    # Each stage's *actual* parent for drop-off math. Engaged and Hot are
+    # SIBLINGS under Connected — both gated on connected only, not on each
+    # other. Showing Hot/Engaged would mislead since Hot isn't strictly
+    # ⊂ Engaged (3 hot leads are not-engaged in current data).
+    stages = [
+        {
+            "key": "leads",
+            "stage": "Leads dialed",
+            "count": leads,
+            "_parent": None,
+            "definition": (
+                "Every lead-attempt in this window — one row per (campaign × phone). "
+                "Same person dialed in two campaigns = 2 here. This matches what "
+                "you see when you click any stage below to drill in."
+            ),
+        },
+        {
+            "key": "connected",
+            "stage": "Connected",
+            "count": connected,
+            "_parent": leads,
+            "definition": (
+                "Leads where a human picked up AND the call completed. "
+                "Excludes voicemail / IVR (answered_by != HUMAN) and dropped calls "
+                "(lifecycle_status != COMPLETED). Subset of Leads dialed."
+            ),
+        },
+        {
+            "key": "engaged",
+            "stage": "Engaged",
+            "count": engaged,
+            "_parent": connected,
+            "definition": (
+                "Connected leads who actively engaged in conversation "
+                "(Hunar's engagement_status = ENGAGED). Different from interest — "
+                "engagement = stayed on the call. Subset of Connected."
+            ),
+        },
+        {
+            "key": "hotleads",
+            "stage": "Hot leads",
+            "count": hot,
+            "_parent": connected,  # NOT engaged — hot is its own slice of connected
+            "definition": (
+                "Connected leads who showed buying intent — either tagged "
+                "HIGH/MEDIUM interest_level OR booked a callback "
+                "(next_step_interest = CALLBACK). Union of both signals. "
+                "Independent slice of Connected, not nested under Engaged. "
+                "These are who sales should call back."
+            ),
+        },
     ]
 
+    # Drop-off rates — vs. each stage's true parent (the actionable conversion
+    # rate) and vs. top of funnel (the cumulative survival rate).
+    top = stages[0]["count"]
+    for s in stages:
+        parent = s.pop("_parent")
+        s["rate_of_previous"] = (s["count"] / parent) if parent else None
+        s["rate_of_top"] = (s["count"] / top) if top else 0.0
 
-# ---------------------------------------------------------------------------
+    return stages
+
+
+# ---------------------------------------------------------------------------# ---------------------------------------------------------------------------
 # Vendor comparison — same metrics, broken down per vendor
 # ---------------------------------------------------------------------------
 async def vendor_comparison(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
