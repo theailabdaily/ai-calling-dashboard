@@ -93,6 +93,16 @@ async def list_calls(
             # miss if they only filtered by interest_level. Lower priority
             # but still explicitly asked for contact.
             extra.append(and_(is_connected, wants_callback, ~is_interested))
+        elif funnel_stage == "interested_only":
+            # Interested (HIGH/MEDIUM) but did NOT ask for a callback.
+            # Mutually exclusive with top_priority and callback_only.
+            extra.append(and_(is_connected, is_interested, ~wants_callback))
+        elif funnel_stage == "no_intent":
+            # Connected lead with NO positive signal — not interested AND
+            # didn't ask for callback. Includes LOW interest, NOT_COVERED,
+            # NOT_AVAILABLE. These are the "had a chance, said no" pool —
+            # useful for QA-ing the bot's pitch.
+            extra.append(and_(is_connected, ~is_interested, ~wants_callback))
         # Legacy stage names — kept for any bookmarked deep-links from the
         # earlier funnel structure. Behave as their semantic descendants.
         elif funnel_stage == "hotleads":
