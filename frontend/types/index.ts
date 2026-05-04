@@ -27,6 +27,29 @@ export type Agent = {
   result_schema: Record<string, unknown>;
 };
 
+export type ConnectedBreakdown = {
+  high: number;
+  medium: number;
+  low: number;
+  not_covered: number;
+  not_available: number;
+  unclassified: number;
+};
+
+export type UnreachedBreakdown = {
+  in_progress: number;
+  not_connected: number;
+  voicemail: number;
+  failed: number;
+};
+
+export type DuplicateCampaign = {
+  campaign_id: string;
+  campaign_name: string;
+  started_at: string | null;
+  shared_leads: number;
+};
+
 export type OverviewMetrics = {
   total_calls: number;
   row_count: number;
@@ -45,9 +68,20 @@ export type OverviewMetrics = {
   conversion_rate: number;
   unique_leads: number;
   unique_connected_leads: number;
+  unique_engaged_leads: number;
   unique_interested_leads: number;
+  unique_callback_leads: number;
+  unique_top_priority_leads: number;
+  unique_callback_only_leads: number;
   attempts_per_lead: number;
   lead_conversion_rate: number;
+  connected_breakdown: ConnectedBreakdown;
+  unreached_breakdown: UnreachedBreakdown;
+  unreached_total: number;
+  duplicate_leads: number;
+  duplicate_rows: number;
+  duplicate_dial_attempts: number;
+  duplicate_campaigns: DuplicateCampaign[];
 };
 
 export type TimeBucket = { bucket: string | null; total: number; connected: number; interested: number };
@@ -110,7 +144,17 @@ export type HourlyInsights = {
   by_vendor:      VendorHourSplit[];
   by_campaign:    CampaignHourSplit[];
 };
-export type FunnelStageKey = 'leads' | 'connected' | 'engaged' | 'hotleads';
+export type FunnelStageKey =
+  | 'leads'
+  | 'connected'
+  | 'engaged'
+  | 'interested'
+  | 'callback'
+  | 'top_priority'
+  | 'callback_only'
+  // Legacy aliases — older bookmarks may still hit these
+  | 'hotleads'
+  | 'followup';
 
 export type FunnelStage = {
   key: FunnelStageKey | string;
