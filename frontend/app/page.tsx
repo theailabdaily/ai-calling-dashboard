@@ -37,8 +37,8 @@ const T = {
   total:      'Every dial attempt in this window, retries included. A lead dialed 5 times = 5 here. To see distinct people reached, look at Unique Leads.',
   uniqueLeads: 'Distinct mobile numbers dialed. The same person called 5 times = 1 lead. Use this to gauge real reach. Total Calls ÷ Unique Leads = avg dials per lead.',
   connected:  'Leads where a human picked up AND completed. Excludes voicemail/IVR pickups (machine answers) and dropped calls. Counted per lead, not per dial.',
-  interested: 'Connected leads who signaled HIGH or MEDIUM interest. From Hunar\'s interest_level field on call result.',
-  conversion: 'Interested ÷ Unique Leads. End-to-end funnel ratio — what % of distinct people produced a hot lead.',
+  hotLeads:   'Connected leads who showed buying intent — either tagged HIGH/MEDIUM interest OR booked a callback. Union of both signals because in Hunar\'s data they\'re independent (a lead can ask for a callback without being marked high-interest, or vice versa).',
+  conversion: 'Hot Leads ÷ Total Leads. End-to-end ratio — what % of leads in this slice produced a sales-positive outcome.',
   avgDur:     'Average length of connected calls only. Failed/voicemail/dropped calls excluded so it reflects real conversations.',
   engagement: 'Of connected calls, % where prospect actively engaged (Hunar\'s engagement_status = ENGAGED). Different from "Interested" — engagement = stayed on call, interest = leaned in.',
   followUp:   'Of connected calls, % where prospect explicitly asked for a callback (next_step_interest = CALLBACK). Strong buying signal.',
@@ -93,11 +93,11 @@ export default function OverviewPage() {
           tooltip={T.connected}
         />
         <MetricCard
-          label="Interested"
-          value={metrics.data ? fmt.int(metrics.data.interested_calls) : '—'}
-          hint={metrics.data ? `${fmt.pct(metrics.data.interest_rate)} of connected` : undefined}
-          tooltip={T.interested}
-          href={buildCallsLink(filters, { only_interested: 'true' })}
+          label="Hot leads"
+          value={metrics.data ? fmt.int(metrics.data.hot_lead_calls) : '—'}
+          hint={metrics.data ? `${fmt.pct(metrics.data.hot_lead_rate)} of connected` : undefined}
+          tooltip={T.hotLeads}
+          href={buildCallsLink(filters, { funnel_stage: 'hotleads' })}
         />
         <MetricCard
           label="Conversion"
@@ -141,6 +141,7 @@ export default function OverviewPage() {
         </div>
         <FunnelChart
           data={funnel.data || []}
+          totalDials={metrics.data?.total_calls ?? null}
           onStageClick={(key, label) => setStage({ key, label })}
         />
       </div>
