@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Filters } from '@/types';
 
-type PresetKey = 'today' | 'yesterday' | 'last7' | 'last30' | 'last90' | 'ytd';
+type PresetKey = 'today' | 'yesterday' | 'last7' | 'last30' | 'last90' | 'ytd' | 'alltime';
 
 const PRESETS: { label: string; key: PresetKey }[] = [
   { label: 'Today',     key: 'today' },
@@ -14,7 +14,14 @@ const PRESETS: { label: string; key: PresetKey }[] = [
   { label: 'Last 30d',  key: 'last30' },
   { label: 'Last 90d',  key: 'last90' },
   { label: 'YTD',       key: 'ytd' },
+  { label: 'All time',  key: 'alltime' },
 ];
+
+// Sentinel "very old" date for the All time preset. Set well before any
+// expected ingest history so it captures everything currently in the DB
+// and any reasonable future backfill, without using literal Date(0) which
+// renders awkwardly in datetime-local inputs.
+const ALL_TIME_START = new Date(2020, 0, 1, 0, 0, 0, 0);
 
 function startOfDay(d: Date) { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
 function endOfDay(d: Date)   { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; }
@@ -39,21 +46,33 @@ function applyPreset(key: PresetKey): { start: Date; end: Date } {
     case 'ytd': {
       return { start: new Date(now.getFullYear(), 0, 1), end: endOfDay(now) };
     }
+    case 'alltime': {
+      // Capture every record in the DB. End is "now to the minute" — using
+      // the actual current time rather than end-of-day makes the chart not
+      // claim it has data for hours that haven't happened yet.
+      return { start: ALL_TIME_START, end: now };
+    }
   }
 }
 
-// "2026-04-30" → Date (local); used for <input type="date"> binding
-function parseInputDate(s: string): Date | null {
+// "2026-04-30T15:30" → Date (local); used for <input type="datetime-local">.
+// We accept and produce the input's native format so timezone math stays
+// consistent with what the user sees in the picker.
+function parseInputDateTime(s: string): Date | null {
   if (!s) return null;
-  const [y, m, d] = s.split('-').map(Number);
-  if (!y || !m || !d) return null;
-  return new Date(y, m - 1, d);
+  // datetime-local sends "YYYY-MM-DDTHH:mm" (sometimes with seconds)
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  const [, y, mo, d, h, mi, se] = m;
+  return new Date(+y, +mo - 1, +d, +h, +mi, +(se ?? 0));
 }
-function toInputDate(d: Date): string {
+function toInputDateTime(d: Date): string {
   const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  const h = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${mo}-${day}T${h}:${mi}`;
 }
 
 function fmtCampaign(c: { name: string; started_at: string | null; vendor_id: string }, vendorName?: string): string {
@@ -103,13 +122,16 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
     onChange({ ...filters, [key]: [...set] });
   };
 
+  // Preserve whatever HH:MM the user picks. Previously these forced
+  // start→00:00 and end→23:59; now they respect the input verbatim so
+  // users can slice by hour-of-day.
   const setStart = (s: string) => {
-    const d = parseInputDate(s);
-    if (d) onChange({ ...filters, start: startOfDay(d) });
+    const d = parseInputDateTime(s);
+    if (d) onChange({ ...filters, start: d });
   };
   const setEnd = (s: string) => {
-    const d = parseInputDate(s);
-    if (d) onChange({ ...filters, end: endOfDay(d) });
+    const d = parseInputDateTime(s);
+    if (d) onChange({ ...filters, end: d });
   };
 
   return (
@@ -128,18 +150,22 @@ export default function FilterBar({ filters, onChange, onExport }: Props) {
         ))}
       </div>
 
-      {/* Custom range */}
-      <div className="flex items-center gap-1 text-xs text-surface-600">
+      {/* Custom range — datetime-local gives a HH:MM picker alongside the
+          date picker in one native widget. step="60" hides the seconds field
+          (default 1; we don't need second-level precision). */}
+      <div className="flex items-center gap-1 text-xs text-surface-600 flex-wrap">
         <input
-          type="date"
-          value={toInputDate(filters.start)}
+          type="datetime-local"
+          step={60}
+          value={toInputDateTime(filters.start)}
           onChange={e => setStart(e.target.value)}
           className="px-2 py-1.5 rounded border border-surface-300 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
         />
         <span className="text-surface-400">→</span>
         <input
-          type="date"
-          value={toInputDate(filters.end)}
+          type="datetime-local"
+          step={60}
+          value={toInputDateTime(filters.end)}
           onChange={e => setEnd(e.target.value)}
           className="px-2 py-1.5 rounded border border-surface-300 text-xs focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
         />
