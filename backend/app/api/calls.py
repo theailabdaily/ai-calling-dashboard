@@ -68,10 +68,26 @@ async def list_calls(
     # Funnel stage filter — for the "click on funnel stage" drill-down
     if funnel_stage:
         is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
-        if funnel_stage == "connected":
+        if funnel_stage == "leads":
+            # Top-of-funnel — every lead in the slice. No additional filter.
+            pass
+        elif funnel_stage == "connected":
             extra.append(is_connected)
         elif funnel_stage == "engaged":
             extra.append(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
+        elif funnel_stage == "hotleads":
+            # Buying-intent signal of any kind — matches _is_hot_lead in
+            # services/metrics.py. Keep these two definitions in lockstep.
+            extra.append(and_(
+                is_connected,
+                or_(
+                    func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+                    func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+                ),
+            ))
+        # Legacy stage names — kept for backward compatibility with any
+        # bookmarked deep-links from before the funnel restructure.
+        # Both now redirect into hotleads' definition.
         elif funnel_stage == "interested":
             extra.append(and_(
                 is_connected,
