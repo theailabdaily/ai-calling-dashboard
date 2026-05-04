@@ -128,6 +128,38 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     _valid_phone = case(
         (and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""), CallLog.mobile_number)
     )
+    # Per-row signal expressions that we'll wrap in COUNT(DISTINCT phone) FILTER.
+    # Using FILTER inside DISTINCT means: "distinct phones where this signal is true on at least one row".
+    # i.e. a lead counts as "engaged" if they engaged on any of their attempts.
+    _conn_phone     = case((_is_connected, _valid_phone))
+    _eng_phone      = case((and_(_is_connected, _is_engaged), _valid_phone))
+    _intr_phone     = case((and_(_is_connected, _is_interested), _valid_phone))
+    _cb_phone       = case((and_(_is_connected, _has_follow_up), _valid_phone))
+    _topprio_phone  = case((and_(_is_connected, _is_interested, _has_follow_up), _valid_phone))
+
+    # Connected breakdown by interest_level (mutually exclusive — uses the
+    # row's interest_level, not "best across attempts". For the connected
+    # row itself, this is fine — a connected phone has at most a few rows
+    # and they're usually consistent. The sum across buckets equals
+    # connected_calls (row count), which lets the stacked bar chart be honest.
+    _il = func.upper(CallLog.result["interest_level"].astext)
+    _conn_high          = and_(_is_connected, _il == "HIGH")
+    _conn_medium        = and_(_is_connected, _il == "MEDIUM")
+    _conn_low           = and_(_is_connected, _il == "LOW")
+    _conn_not_covered   = and_(_is_connected, _il == "NOT COVERED")
+    _conn_not_available = and_(_is_connected, _il == "NOT AVAILABLE")
+    _conn_unclassified  = and_(
+        _is_connected,
+        or_(_il.is_(None), _il.notin_(["HIGH", "MEDIUM", "LOW", "NOT COVERED", "NOT AVAILABLE"])),
+    )
+
+    # Lifecycle breakdown — what happened to leads we *didn't* connect with.
+    # The 436 IN_PROGRESS bucket is the one currently invisible on the dashboard.
+    _is_in_progress  = CallLog.lifecycle_status == "IN_PROGRESS"
+    _is_voicemail    = and_(CallLog.lifecycle_status == "NOT_CONNECTED", CallLog.answered_by == "MACHINE")
+    _is_not_conn_nv  = and_(CallLog.lifecycle_status == "NOT_CONNECTED", CallLog.answered_by != "MACHINE")
+    _is_failed       = CallLog.lifecycle_status == "FAILED"
+
     stmt = select(
         # row_count = leads-with-attempts in slice. Used as denominator for
         # rates because connected/engaged/interested counts come from one row
@@ -135,22 +167,35 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         # consumer-facing equivalent (distinct phones).
         func.count(CallLog.id).label("row_count"),
         # Public total_calls = total dial attempts (initial + retries).
-        # This is what the "Total Calls" tile claims to show in its tooltip.
+        # This is what the "Dial attempts" tile claims to show in its tooltip.
         _total_dials_expr.label("total_calls"),
         func.count(distinct(_valid_phone)).label("unique_leads"),
+        # Row-based counts — kept for backward compat (existing tiles use these)
         func.sum(case((_is_connected, 1), else_=0)).label("connected_calls"),
-        func.count(distinct(case((_is_connected, CallLog.mobile_number)))).label("unique_connected_leads"),
-        func.count(distinct(case((and_(_is_connected, _is_interested), CallLog.mobile_number)))).label("unique_interested_leads"),
         func.sum(case((CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")), 1), else_=0)).label("failed_calls"),
         func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_duration_sec"),
         func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged_calls"),
         func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested_calls"),
         func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("follow_up_calls"),
-        # Hot lead = buying-intent signal of any kind, gated on connected.
-        # Drives the funnel's bottom stage. SQL-side OR vs Python max() of
-        # the two counters because a lead can be interested OR followup OR
-        # both, and we don't want to double-count the intersection.
         func.sum(case((and_(_is_connected, _is_hot_lead), 1), else_=0)).label("hot_lead_calls"),
+        # Unique-lead counts — these drive the new funnel
+        func.count(distinct(_conn_phone)).label("unique_connected_leads"),
+        func.count(distinct(_eng_phone)).label("unique_engaged_leads"),
+        func.count(distinct(_intr_phone)).label("unique_interested_leads"),
+        func.count(distinct(_cb_phone)).label("unique_callback_leads"),
+        func.count(distinct(_topprio_phone)).label("unique_top_priority_leads"),
+        # Connected breakdown — row counts per interest bucket (sum to connected_calls)
+        func.sum(case((_conn_high, 1), else_=0)).label("conn_high"),
+        func.sum(case((_conn_medium, 1), else_=0)).label("conn_medium"),
+        func.sum(case((_conn_low, 1), else_=0)).label("conn_low"),
+        func.sum(case((_conn_not_covered, 1), else_=0)).label("conn_not_covered"),
+        func.sum(case((_conn_not_available, 1), else_=0)).label("conn_not_available"),
+        func.sum(case((_conn_unclassified, 1), else_=0)).label("conn_unclassified"),
+        # Unreached breakdown — what happened to the rest
+        func.sum(case((_is_in_progress, 1), else_=0)).label("in_progress_rows"),
+        func.sum(case((_is_voicemail, 1), else_=0)).label("voicemail_rows"),
+        func.sum(case((_is_not_conn_nv, 1), else_=0)).label("not_connected_rows"),
+        func.sum(case((_is_failed, 1), else_=0)).label("failed_rows"),
     )
     stmt = filters.apply(stmt)
     row = (await db.execute(stmt)).one()
@@ -159,7 +204,14 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     total = int(row.total_calls or 0)
     unique_leads = int(row.unique_leads or 0)
     unique_connected = int(row.unique_connected_leads or 0)
+    unique_engaged = int(row.unique_engaged_leads or 0)
     unique_interested = int(row.unique_interested_leads or 0)
+    unique_callback = int(row.unique_callback_leads or 0)
+    unique_top_priority = int(row.unique_top_priority_leads or 0)
+    # "Callback only" = callback leads minus those who are also interested.
+    # By inclusion-exclusion. These are the lower-quality-but-still-asking-
+    # to-be-contacted leads sales might otherwise miss.
+    unique_callback_only = max(unique_callback - unique_top_priority, 0)
     connected = int(row.connected_calls or 0)
     failed = int(row.failed_calls or 0)
     engaged = int(row.engaged_calls or 0)
@@ -167,12 +219,105 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     follow_up = int(row.follow_up_calls or 0)
     hot_leads = int(row.hot_lead_calls or 0)
 
+    connected_breakdown = {
+        "high":          int(row.conn_high or 0),
+        "medium":        int(row.conn_medium or 0),
+        "low":           int(row.conn_low or 0),
+        "not_covered":   int(row.conn_not_covered or 0),
+        "not_available": int(row.conn_not_available or 0),
+        "unclassified":  int(row.conn_unclassified or 0),
+    }
+    in_progress_rows = int(row.in_progress_rows or 0)
+    voicemail_rows = int(row.voicemail_rows or 0)
+    not_connected_rows = int(row.not_connected_rows or 0)
+    failed_rows = int(row.failed_rows or 0)
+    unreached_breakdown = {
+        "in_progress":   in_progress_rows,
+        "not_connected": not_connected_rows,
+        "voicemail":     voicemail_rows,
+        "failed":        failed_rows,
+    }
+    # Total unreached row-count (helpful for tile)
+    unreached_total = in_progress_rows + voicemail_rows + not_connected_rows + failed_rows
+
+    # ---------------------------------------------------------------
+    # Cross-campaign duplicate leads — same phone uploaded to multiple
+    # campaigns. Done as a separate query because it requires GROUP BY
+    # phone (different shape from the main aggregate). Cheap — same
+    # filtered slice, indexed on (vendor_id, vendor_created_at).
+    #
+    # Why this matters operationally: each duplicate consumes a fresh
+    # set of dials, sometimes intentional (re-targeting) and sometimes
+    # accidental (the same lead list got uploaded to two campaigns).
+    # We surface counts; we don't editorialize on "waste".
+    # ---------------------------------------------------------------
+    _phone_grouped = (
+        select(
+            CallLog.mobile_number.label("phone"),
+            func.count(CallLog.id).label("rows"),
+            func.count(distinct(CallLog.campaign_id)).label("campaigns"),
+            _total_dials_expr.label("dials"),
+        )
+        .where(and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
+        .group_by(CallLog.mobile_number)
+    )
+    _phone_grouped = filters.apply(_phone_grouped).subquery()
+
+    dup_stmt = select(
+        func.count().filter(_phone_grouped.c.campaigns > 1).label("dup_leads"),
+        func.coalesce(func.sum(_phone_grouped.c.rows).filter(_phone_grouped.c.campaigns > 1), 0).label("dup_rows"),
+        func.coalesce(func.sum(_phone_grouped.c.dials).filter(_phone_grouped.c.campaigns > 1), 0).label("dup_dials"),
+    ).select_from(_phone_grouped)
+    drow = (await db.execute(dup_stmt)).one()
+    dup_leads = int(drow.dup_leads or 0)
+    dup_rows = int(drow.dup_rows or 0)
+    dup_dials = int(drow.dup_dials or 0)
+
+    # Per-campaign breakdown of where the duplicate phones live —
+    # only computed when there ARE duplicates (otherwise: noop).
+    duplicate_campaigns: list[dict[str, Any]] = []
+    if dup_leads > 0:
+        # Subquery: phones that appear in 2+ campaigns within this slice
+        from app.models import Campaign as _Cmp
+        dup_phones_sq = (
+            select(CallLog.mobile_number)
+            .where(and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
+            .group_by(CallLog.mobile_number)
+            .having(func.count(distinct(CallLog.campaign_id)) > 1)
+        )
+        dup_phones_sq = filters.apply(dup_phones_sq).subquery()
+
+        camp_stmt = (
+            select(
+                _Cmp.id,
+                _Cmp.name,
+                func.coalesce(_Cmp.started_at, _Cmp.created_at).label("started_at"),
+                func.count().label("shared"),
+            )
+            .join(CallLog, CallLog.campaign_id == _Cmp.id)
+            .where(CallLog.mobile_number.in_(select(dup_phones_sq.c.mobile_number)))
+            .group_by(_Cmp.id, _Cmp.name, _Cmp.started_at, _Cmp.created_at)
+            .order_by(func.count().desc())
+        )
+        camp_stmt = filters.apply(camp_stmt)
+        for r in (await db.execute(camp_stmt)).all():
+            duplicate_campaigns.append({
+                "campaign_id":   str(r.id),
+                "campaign_name": r.name,
+                "started_at":    r.started_at.isoformat() if r.started_at else None,
+                "shared_leads":  int(r.shared or 0),
+            })
+
     return {
-        "total_calls": total,                          # 731 — dial attempts
-        "row_count": row_count,                        # 200 — rows in call_logs (= lead-attempts in slice)
-        "unique_leads": unique_leads,                  # 200 — distinct phones
+        "total_calls": total,                          # 3,810 — dial attempts
+        "row_count": row_count,                        # 1,003 — rows in call_logs (= lead-attempts in slice)
+        "unique_leads": unique_leads,                  # 929 — distinct phones
         "unique_connected_leads": unique_connected,
+        "unique_engaged_leads": unique_engaged,
         "unique_interested_leads": unique_interested,
+        "unique_callback_leads": unique_callback,
+        "unique_top_priority_leads": unique_top_priority,
+        "unique_callback_only_leads": unique_callback_only,
         "connected_calls": connected,
         "failed_calls": failed,
         "avg_duration_seconds": float(row.avg_duration_sec or 0),
@@ -180,6 +325,13 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         "interested_calls": interested,
         "follow_up_calls": follow_up,
         "hot_lead_calls": hot_leads,
+        # Connected (474) further sliced by interest_level — drives the
+        # "Connected breakdown" stacked bar. Sum equals connected_calls.
+        "connected_breakdown": connected_breakdown,
+        # The leads we DIDN'T connect with — including the previously-invisible
+        # 436 in-progress bucket. Sum equals row_count - connected_calls.
+        "unreached_breakdown": unreached_breakdown,
+        "unreached_total": unreached_total,
         # Rate denominators are LEAD-level (row_count), not dial-level.
         # See module docstring for why per-dial rates aren't computable.
         "connection_rate": _safe_div(connected, row_count),
@@ -191,6 +343,12 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         "lead_conversion_rate": _safe_div(unique_interested, unique_leads),
         # Now actually meaningful: (initial + retries) / leads.
         "attempts_per_lead": (total / unique_leads) if unique_leads else 0.0,
+        # Cross-campaign duplicates — same phone uploaded to multiple campaigns.
+        # 0 when filter narrows to a single campaign (can't have duplicates within one).
+        "duplicate_leads": dup_leads,
+        "duplicate_rows": dup_rows,
+        "duplicate_dial_attempts": dup_dials,
+        "duplicate_campaigns": duplicate_campaigns,
     }
 
 
@@ -226,49 +384,46 @@ async def calls_over_time(db: AsyncSession, filters: MetricFilters, bucket: str 
 
 
 # ---------------------------------------------------------------------------
-# Funnel: Leads → Connected → Engaged → Hot leads (all lead-level)
+# Funnel: Unique leads → Connected → Engaged → Interested → Top priority
+# All stages are unique-lead counts (one phone = one count per stage).
 # ---------------------------------------------------------------------------
 async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
-    """Conversion funnel — purely lead-level so each stage is a count of
-    distinct leads (one row per lead in our schema). Mixing dial-attempts
-    at the top with leads below produced misleading drop-off rates
-    (e.g. 250/3050 = 8% looked terrible when the real rate is 250/603 = 41%).
+    """Conversion funnel — strict subset, every stage in unique-lead basis.
 
-    Stages 2–4 are gated only on `connected` — not on each previous stage.
-    This means Engaged and Hot leads are independent slices of Connected.
-    The numbers happen to nest cleanly in current data (engaged > hot) but
-    we don't ENFORCE nesting because that would hide real edge cases (e.g.
-    a lead who asked for a callback but Hunar marked not-engaged).
+    Top = unique phones in the slice. Each subsequent stage is a strict
+    subset of the previous one in semantic meaning (a lead can't be in
+    Connected without being in Leads, etc.).
 
-    Each stage carries a definition string so the UI can render it inline
-    without hardcoding anything frontend-side. If we change the SQL, the
-    definition text changes with it — single source of truth.
+    Why we dropped the old "Hot leads" union (interested OR callback):
+    - It mixed two independent signals into one number, hiding the
+      distribution. Sales actually wants to know which leads are
+      HIGH/MEDIUM-interest separately from who asked for callback.
+    - Showed 178 = "interested OR callback" but the user asked the right
+      question: where did each signal sit individually?
+
+    The new bottom stage "Top priority" = both signals = lowest-noise
+    list for sales to action first. Wider Callback list lives outside
+    the funnel as a sibling card so it doesn't disappear.
     """
     m = await compute_overview_metrics(db, filters)
-    # row_count is what we use everywhere below (each row in call_logs is one
-    # lead-attempt in this slice, gated on conditions for connected/engaged/hot).
-    # If we used unique_leads (distinct phones) here, a phone dialed in two
-    # campaigns would count once at top but twice below — drop-off math breaks.
-    # Same denominator basis throughout = honest funnel.
-    leads = int(m.get("row_count") or 0)
-    connected = int(m.get("connected_calls") or 0)
-    engaged = int(m.get("engaged_calls") or 0)
-    hot = int(m.get("hot_lead_calls") or 0)
+    leads        = int(m.get("unique_leads")              or 0)
+    connected    = int(m.get("unique_connected_leads")    or 0)
+    engaged      = int(m.get("unique_engaged_leads")      or 0)
+    interested   = int(m.get("unique_interested_leads")   or 0)
+    top_priority = int(m.get("unique_top_priority_leads") or 0)
 
-    # Each stage's *actual* parent for drop-off math. Engaged and Hot are
-    # SIBLINGS under Connected — both gated on connected only, not on each
-    # other. Showing Hot/Engaged would mislead since Hot isn't strictly
-    # ⊂ Engaged (3 hot leads are not-engaged in current data).
+    # Each stage's parent is the stage immediately above it — funnel is
+    # genuinely linear / strict-subset now. No sibling-of-Connected weirdness.
     stages = [
         {
             "key": "leads",
-            "stage": "Leads dialed",
+            "stage": "Unique leads",
             "count": leads,
             "_parent": None,
             "definition": (
-                "Every lead-attempt in this window — one row per (campaign × phone). "
-                "Same person dialed in two campaigns = 2 here. This matches what "
-                "you see when you click any stage below to drill in."
+                "Distinct phone numbers dialed in this window. Same person "
+                "called in 5 attempts across 2 campaigns = 1 lead here. "
+                "This is the universe everything below funnels from."
             ),
         },
         {
@@ -277,9 +432,9 @@ async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str
             "count": connected,
             "_parent": leads,
             "definition": (
-                "Leads where a human picked up AND the call completed. "
-                "Excludes voicemail / IVR (answered_by != HUMAN) and dropped calls "
-                "(lifecycle_status != COMPLETED). Subset of Leads dialed."
+                "Leads we actually reached — at least one attempt completed "
+                "with a HUMAN pickup. Excludes voicemail (answered_by=MACHINE), "
+                "in-progress retries, and hard failures."
             ),
         },
         {
@@ -288,22 +443,30 @@ async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str
             "count": engaged,
             "_parent": connected,
             "definition": (
-                "Connected leads who actively engaged in conversation "
-                "(Hunar's engagement_status = ENGAGED). Different from interest — "
-                "engagement = stayed on the call. Subset of Connected."
+                "Connected leads who actively engaged in the conversation "
+                "(Hunar's engagement_status=ENGAGED on at least one attempt). "
+                "Different from interest — engagement = stayed on the call."
             ),
         },
         {
-            "key": "hotleads",
-            "stage": "Hot leads",
-            "count": hot,
-            "_parent": connected,  # NOT engaged — hot is its own slice of connected
+            "key": "interested",
+            "stage": "Interested (HIGH/MEDIUM)",
+            "count": interested,
+            "_parent": connected,  # not nested under Engaged — independent slice
             "definition": (
-                "Connected leads who showed buying intent — either tagged "
-                "HIGH/MEDIUM interest_level OR booked a callback "
-                "(next_step_interest = CALLBACK). Union of both signals. "
-                "Independent slice of Connected, not nested under Engaged. "
-                "These are who sales should call back."
+                "Connected leads tagged HIGH or MEDIUM interest_level by "
+                "Hunar's classifier. The qualified-intent pool."
+            ),
+        },
+        {
+            "key": "top_priority",
+            "stage": "Top priority",
+            "count": top_priority,
+            "_parent": interested,
+            "definition": (
+                "Leads who are BOTH Interested (HIGH/MEDIUM) AND asked for a "
+                "callback (next_step_interest=CALLBACK). The lowest-noise, "
+                "highest-intent list — call these first."
             ),
         },
     ]
