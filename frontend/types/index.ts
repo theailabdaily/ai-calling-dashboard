@@ -1,332 +1,203 @@
-export type Vendor = {
-  id: string;
-  slug: string;
-  name: string;
-  is_active: boolean;
-};
+"""
+Calls list + detail endpoints.
 
-export type Campaign = {
-  id: string;
-  name: string;
-  display_name?: string | null;
-  vendor_id: string;
-  vendor_name?: string | null;
-  vendor_request_id: string;
-  agent_id: string | null;
-  started_at: string | null;
-  expected_calls: number | null;
-};
+The list endpoint is the entry point for QA workflows: filter, search by phone
+or name, click into a call. Server-side pagination because we expect 100k+ rows.
+"""
+from __future__ import annotations
 
-export type Agent = {
-  id: string;
-  vendor_id: string;
-  vendor_agent_id: string;
-  name: string;
-  language: string | null;
-  voice_persona: string | null;
-  result_schema: Record<string, unknown>;
-};
+from uuid import UUID
 
-export type OverviewMetrics = {
-  total_calls: number;
-  connected_calls: number;
-  failed_calls: number;
-  avg_duration_seconds: number;
-  engaged_calls: number;
-  interested_calls: number;
-  follow_up_calls: number;
-  connection_rate: number;
-  engagement_rate: number;
-  interest_rate: number;
-  follow_up_rate: number;
-  conversion_rate: number;
-  unique_leads: number;
-  unique_connected_leads: number;
-  unique_interested_leads: number;
-  attempts_per_lead: number;
-  lead_conversion_rate: number;
-};
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-export type TimeBucket = { bucket: string | null; total: number; connected: number; interested: number };
-export type HourBucket = {
-  hour: number;
-  total_calls: number;
-  connected_calls: number;
-  engaged_calls: number;
-  interested_calls: number;
-  avg_duration_seconds: number;
-  connection_rate: number;
-  engagement_rate: number;
-  interest_rate: number;
-};
+from app.api._filters import parse_filters
+from app.database import get_db
+from app.models import Agent, CallLog, Campaign, Vendor
+from app.schemas import CallDetail, CallListItem, CallListPage
+from app.services.metrics import MetricFilters
 
-export type DowBucket = {
-  dow: number;          // 1=Mon ... 7=Sun
-  dow_name: string;
-  total_calls: number;
-  connected_calls: number;
-  engaged_calls: number;
-  interested_calls: number;
-  avg_duration_seconds: number;
-  connection_rate: number;
-  engagement_rate: number;
-  interest_rate: number;
-};
+router = APIRouter(prefix="/api/calls", tags=["calls"])
 
-export type HeatmapCell = {
-  dow: number;
-  dow_name: string;
-  hour: number;
-  total_calls: number;
-  connected_calls: number;
-  engaged_calls: number;
-  interested_calls: number;
-  avg_duration_seconds: number;
-  connection_rate: number;
-  engagement_rate: number;
-  interest_rate: number;
-};
 
-export type VendorHourSplit = {
-  vendor_id: string;
-  vendor_name: string;
-  hours: HourBucket[];
-};
+@router.get("", response_model=CallListPage)
+async def list_calls(
+    filters: MetricFilters = Depends(parse_filters),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    search: str | None = Query(None, description="Match against name / phone"),
+    status: str | None = Query(None),
+    answered_by: str | None = Query(None),
+    only_with_recording: bool = Query(False),
+    only_interested: bool = Query(False),
+    failed_only: bool = Query(False),
+    funnel_stage: str | None = Query(None, description="connected | engaged | interested | followup"),
+    sort_by: str = Query("when", description="when | duration | status"),
+    sort_order: str = Query("desc", description="asc | desc"),
+    db: AsyncSession = Depends(get_db),
+):
+    base = (
+        select(
+            CallLog,
+            Vendor.name.label("vendor_name"),
+            Campaign.name.label("campaign_name"),
+            Agent.name.label("agent_name"),
+        )
+        .join(Vendor, Vendor.id == CallLog.vendor_id)
+        .outerjoin(Campaign, Campaign.id == CallLog.campaign_id)
+        .outerjoin(Agent, Agent.id == CallLog.agent_id)
+    )
+    base = filters.apply(base)
 
-export type CampaignHourSplit = {
-  campaign_id: string;
-  campaign_name: string;
-  display_name?: string | null;
-  hours: HourBucket[];
-};
+    extra = []
+    if search:
+        s = f"%{search}%"
+        extra.append(or_(CallLog.callee_name.ilike(s), CallLog.mobile_number.ilike(s)))
+    if status:
+        extra.append(CallLog.lifecycle_status == status.upper())
+    if answered_by:
+        extra.append(CallLog.answered_by == answered_by.upper())
+    if only_with_recording:
+        extra.append(CallLog.recording_url.isnot(None))
+    if only_interested:
+        extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
+    if failed_only:
+        extra.append(CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")))
 
-export type HourlyInsights = {
-  hour_breakdown: HourBucket[];
-  dow_breakdown:  DowBucket[];
-  heatmap:        HeatmapCell[];
-  by_vendor:      VendorHourSplit[];
-  by_campaign:    CampaignHourSplit[];
-};
-export type FunnelStage = { stage: string; count: number };
+    # Funnel stage filter — for the "click on funnel stage" drill-down
+    if funnel_stage:
+        is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
+        if funnel_stage == "leads":
+            # Top-of-funnel — every lead in the slice. No additional filter.
+            pass
+        elif funnel_stage == "connected":
+            extra.append(is_connected)
+        elif funnel_stage == "engaged":
+            extra.append(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
+        elif funnel_stage == "hotleads":
+            # Buying-intent signal of any kind — matches _is_hot_lead in
+            # services/metrics.py. Keep these two definitions in lockstep.
+            extra.append(and_(
+                is_connected,
+                or_(
+                    func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+                    func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+                ),
+            ))
+        # Legacy stage names — kept for backward compatibility with any
+        # bookmarked deep-links from before the funnel restructure.
+        # Both now redirect into hotleads' definition.
+        elif funnel_stage == "interested":
+            extra.append(and_(
+                is_connected,
+                func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+            ))
+        elif funnel_stage == "followup":
+            extra.append(and_(
+                is_connected,
+                func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+            ))
 
-export type VendorRow = {
-  vendor_id: string;
-  vendor_slug: string;
-  vendor_name: string;
-  total_calls: number;
-  connected_calls: number;
-  avg_duration_seconds: number;
-  connection_rate: number;
-  engagement_rate: number;
-  interest_rate: number;
-  follow_up_rate: number;
-  unique_leads: number;
-  attempts_per_lead: number;
-};
+    if extra:
+        base = base.where(and_(*extra))
 
-export type CampaignRow = {
-  campaign_id: string;
-  campaign_name: string;
-  display_name?: string | null;
-  vendor_id: string;
-  vendor_name?: string | null;
-  started_at: string | null;
-  total_calls: number;
-  connected_calls: number;
-  interested_calls: number;
-  connection_rate: number;
-  interest_rate: number;
-};
+    # Total count (separate query — we want paginated rows, not all rows)
+    count_stmt = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_stmt)).scalar_one()
 
-export type CallListItem = {
-  id: string;
-  vendor_name: string;
-  campaign_name: string | null;
-  agent_name: string | null;
-  callee_name: string | null;
-  mobile_number: string | null;
-  status: string;
-  lifecycle_status: string;
-  answered_by: string;
-  engagement_status: string;
-  duration_seconds: number | null;
-  started_at: string | null;
-  has_recording: boolean;
-  interested: string | null;
-  follow_up_at: string | null;
-};
+    # Sorting — map sort_by name to column. Default to started_at DESC.
+    sort_col = {
+        "when": CallLog.started_at,
+        "duration": CallLog.duration_seconds,
+        "status": CallLog.lifecycle_status,
+    }.get(sort_by, CallLog.started_at)
+    direction = sort_col.asc() if sort_order == "asc" else sort_col.desc()
+    if sort_by == "when":
+        direction = direction.nullslast() if sort_order == "desc" else direction.nullsfirst()
 
-export type CallListPage = {
-  items: CallListItem[];
-  total: number;
-  page: number;
-  page_size: number;
-};
+    rows_stmt = (
+        base.order_by(direction)
+            .limit(page_size)
+            .offset((page - 1) * page_size)
+    )
+    rows = (await db.execute(rows_stmt)).all()
 
-export type CallDetail = {
-  id: string;
-  vendor_id: string;
-  vendor_name: string;
-  vendor_call_id: string;
-  campaign_id: string | null;
-  campaign_name: string | null;
-  agent_id: string | null;
-  agent_name: string | null;
-  callee_name: string | null;
-  mobile_number: string | null;
-  from_phone_number: string | null;
-  language: string | null;
-  status: string;
-  lifecycle_status: string;
-  engagement_status: string;
-  answered_by: string;
-  call_ended_by: string;
-  duration_seconds: number | null;
-  duration_minutes: number | null;
-  user_speech_duration: number | null;
-  max_retries: number;
-  retry_count: number;
-  retries_left: number;
-  recording_url: string | null;
-  custom_data: Record<string, unknown>;
-  result: Record<string, unknown>;
-  started_at: string | null;
-  ended_at: string | null;
-};
+    items = []
+    for row in rows:
+        c: CallLog = row[0]
+        # Hunar JSONB schema: interest_level (HIGH/MEDIUM/LOW) and follow_up_time
+        interested = c.result.get("interest_level") if isinstance(c.result, dict) else None
+        follow_up_raw = c.result.get("follow_up_time") if isinstance(c.result, dict) else None
+        # Hunar uses "NA" / "NOT AVAILABLE" / "Not Covered" as null sentinels — collapse those
+        follow_up = follow_up_raw if follow_up_raw and follow_up_raw.upper() not in ("NA", "NOT AVAILABLE", "NOT COVERED") else None
+        items.append(CallListItem(
+            id=c.id,
+            vendor_name=row.vendor_name,
+            campaign_name=row.campaign_name,
+            agent_name=row.agent_name,
+            callee_name=c.callee_name,
+            mobile_number=c.mobile_number,
+            status=c.status,
+            lifecycle_status=c.lifecycle_status,
+            answered_by=c.answered_by,
+            engagement_status=c.engagement_status,
+            duration_seconds=float(c.duration_seconds) if c.duration_seconds else None,
+            started_at=c.started_at,
+            has_recording=bool(c.recording_url),
+            interested=str(interested) if interested is not None else None,
+            follow_up_at=str(follow_up) if follow_up is not None else None,
+        ))
 
-export type AgentPerformanceRow = {
-  agent_id: string;
-  agent_name: string;
-  vendor_name: string;
-  language: string | null;
-  voice_persona: string | null;
-  total_calls: number;
-  connected_calls: number;
-  avg_duration_seconds: number;
-  connection_rate: number;
-  engagement_rate: number;
-  interest_rate: number;
-  follow_up_rate: number;
-};
+    return CallListPage(items=items, total=int(total or 0), page=page, page_size=page_size)
 
-export type TriggerCampaignRequest = {
-  vendor_slug: string;
-  vendor_agent_id: string;
-  sheet_id: string;
-  worksheet_name?: string;
-  campaign_name?: string;
-  max_recipients?: number;
-};
 
-export type TriggerCampaignResponse = {
-  status: string;
-  request_id: string;
-  sheet_rows_inserted: number;
-  recipients_pushed: number;
-  vendor_response?: Record<string, unknown>;
-  warning?: string;
-};
+@router.get("/{call_id}", response_model=CallDetail)
+async def get_call(call_id: UUID, db: AsyncSession = Depends(get_db)):
+    stmt = (
+        select(
+            CallLog,
+            Vendor.name.label("vendor_name"),
+            Campaign.name.label("campaign_name"),
+            Agent.name.label("agent_name"),
+        )
+        .join(Vendor, Vendor.id == CallLog.vendor_id)
+        .outerjoin(Campaign, Campaign.id == CallLog.campaign_id)
+        .outerjoin(Agent, Agent.id == CallLog.agent_id)
+        .where(CallLog.id == call_id)
+    )
+    row = (await db.execute(stmt)).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Call not found")
 
-export type Filters = {
-  start: Date;
-  end: Date;
-  vendor_ids: string[];
-  campaign_ids: string[];
-};
-
-export type OutcomeRow = {
-  outcome: string;
-  count: number;
-  pct: number;
-};
-
-export type OutcomeDistribution = {
-  by_call: OutcomeRow[];
-  by_lead: OutcomeRow[];
-};
-
-export type AttemptsRow = {
-  attempts: number;       // total dial attempts on the lead (retry_count + 1, summed across rows)
-  leads: number;          // unique leads that received exactly this many attempts
-  connected: number;      // of those leads, how many ever picked up (HUMAN + COMPLETED)
-  pct_of_leads: number;   // leads / total_leads
-  connect_rate: number;   // connected / leads — the cohort pickup rate (most useful column)
-};
-
-export type AttemptsDistribution = {
-  rows: AttemptsRow[];
-  total_leads: number;
-  total_connected: number;
-  total_calls: number;
-};
-
-// ---------------------------------------------------------------------------
-// Activity log / ledger — operational journal
-// ---------------------------------------------------------------------------
-
-export const LEDGER_ENTRY_TYPES = ['leads_given', 'campaign_created', 'note', 'config_change'] as const;
-export type LedgerEntryType = typeof LEDGER_ENTRY_TYPES[number];
-
-export type LedgerLiveStats = {
-  total_calls: number;
-  unique_leads: number;
-  connected: number;
-  interested: number;
-  avg_duration_seconds: number;
-};
-
-export type LedgerEntry = {
-  id: string;
-  entry_type: LedgerEntryType;
-  title: string;
-  occurred_at: string;
-  vendor_id: string | null;
-  vendor_name: string | null;
-  campaign_id: string | null;
-  campaign_name: string | null;
-  campaign_vendor_request_id: string | null;
-  leads_total: number | null;
-  leads_unique: number | null;
-  notes: string | null;
-  metadata: Record<string, unknown>;
-  live_stats: LedgerLiveStats | null;
-  created_at: string;
-  updated_at: string;
-};
-
-export type LedgerEntryInput = {
-  entry_type: LedgerEntryType;
-  title: string;
-  occurred_at?: string;
-  vendor_id?: string | null;
-  campaign_id?: string | null;
-  leads_total?: number | null;
-  leads_unique?: number | null;
-  notes?: string | null;
-  metadata?: Record<string, unknown>;
-};
-
-export type LedgerListResponse = {
-  items: LedgerEntry[];
-  total: number;
-  page: number;
-  page_size: number;
-};
-
-export type PendingCampaign = {
-  campaign_id: string;
-  campaign_name: string;
-  vendor_id: string;
-  vendor_name: string;
-  vendor_request_id: string;
-  started_at: string | null;
-  expected_calls: number | null;
-  total_calls: number;
-  unique_leads: number;
-};
-
-export type PendingCampaignsResponse = {
-  items: PendingCampaign[];
-  total: number;
-  days: number;
-};
+    c: CallLog = row[0]
+    return CallDetail(
+        id=c.id,
+        vendor_id=c.vendor_id,
+        vendor_name=row.vendor_name,
+        vendor_call_id=c.vendor_call_id,
+        campaign_id=c.campaign_id,
+        campaign_name=row.campaign_name,
+        agent_id=c.agent_id,
+        agent_name=row.agent_name,
+        callee_name=c.callee_name,
+        mobile_number=c.mobile_number,
+        from_phone_number=c.from_phone_number,
+        language=c.language,
+        status=c.status,
+        lifecycle_status=c.lifecycle_status,
+        engagement_status=c.engagement_status,
+        answered_by=c.answered_by,
+        call_ended_by=c.call_ended_by,
+        duration_seconds=float(c.duration_seconds) if c.duration_seconds else None,
+        duration_minutes=float(c.duration_minutes) if c.duration_minutes else None,
+        user_speech_duration=float(c.user_speech_duration) if c.user_speech_duration else None,
+        max_retries=c.max_retries,
+        retry_count=c.retry_count,
+        retries_left=c.retries_left,
+        recording_url=c.recording_url,
+        custom_data=c.custom_data or {},
+        result=c.result or {},
+        started_at=c.started_at,
+        ended_at=c.ended_at,
+    )
