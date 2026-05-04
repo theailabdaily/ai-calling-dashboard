@@ -29,16 +29,19 @@ export type Agent = {
 
 export type OverviewMetrics = {
   total_calls: number;
+  row_count: number;
   connected_calls: number;
   failed_calls: number;
   avg_duration_seconds: number;
   engaged_calls: number;
   interested_calls: number;
   follow_up_calls: number;
+  hot_lead_calls: number;
   connection_rate: number;
   engagement_rate: number;
   interest_rate: number;
   follow_up_rate: number;
+  hot_lead_rate: number;
   conversion_rate: number;
   unique_leads: number;
   unique_connected_leads: number;
