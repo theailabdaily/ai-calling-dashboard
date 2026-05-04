@@ -88,34 +88,28 @@ async def export_calls(
     # Same definition as calls.py and metrics.py: connected = COMPLETED + HUMAN.
     if funnel_stage:
         is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
+        is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
+        wants_callback = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
+
         if funnel_stage == "leads":
-            # Top-of-funnel — every lead in the slice. No extra filter.
             pass
         elif funnel_stage == "connected":
             extra.append(is_connected)
         elif funnel_stage == "engaged":
             extra.append(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
         elif funnel_stage == "interested":
-            # Legacy — kept for URL backward compat.
-            extra.append(and_(
-                is_connected,
-                func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
-            ))
-        elif funnel_stage == "followup":
-            # Legacy — kept for URL backward compat.
-            extra.append(and_(
-                is_connected,
-                func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
-            ))
+            extra.append(and_(is_connected, is_interested))
+        elif funnel_stage == "callback":
+            extra.append(and_(is_connected, wants_callback))
+        elif funnel_stage == "top_priority":
+            extra.append(and_(is_connected, is_interested, wants_callback))
+        elif funnel_stage == "callback_only":
+            extra.append(and_(is_connected, wants_callback, ~is_interested))
+        # Legacy aliases
         elif funnel_stage == "hotleads":
-            # Hot lead = connected AND (interested OR follow-up booked).
-            extra.append(and_(
-                is_connected,
-                or_(
-                    func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
-                    func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
-                ),
-            ))
+            extra.append(and_(is_connected, or_(is_interested, wants_callback)))
+        elif funnel_stage == "followup":
+            extra.append(and_(is_connected, wants_callback))
 
     if extra:
         stmt = stmt.where(and_(*extra))
