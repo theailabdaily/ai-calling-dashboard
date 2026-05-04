@@ -135,8 +135,20 @@ class HourlyInsights(BaseModel):
 
 
 class FunnelStage(BaseModel):
+    """One stage of the conversion funnel.
+
+    `key` is a stable identifier for filter/drill-down ('connected', 'engaged',
+    'hotleads'). `stage` is the human label. `definition` explains what's
+    counted — surfaced as a tooltip in the UI so users don't have to guess.
+    `rate_of_previous` is the drop-off vs. the stage above (None for the top
+    stage); `rate_of_top` is the cumulative survival rate from the top.
+    """
+    key: str
     stage: str
     count: int
+    definition: str
+    rate_of_previous: float | None = None
+    rate_of_top: float = 0.0
 
 
 class VendorRow(BaseModel):
