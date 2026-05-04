@@ -35,8 +35,10 @@ export default function FunnelStageDrawer({ filters, stage, stageLabel, onClose,
 
   const totalPages = calls.data ? Math.max(1, Math.ceil(calls.data.total / calls.data.page_size)) : 1;
 
-  // Build export URL with funnel_stage param
-  const exportUrl = api.exportCallsUrl(filters, stage);
+  // Build export URL with funnel_stage param. The drawer scopes the export
+  // to the funnel stage being viewed (connected/engaged/interested/followup);
+  // top-level filters carry over from the page.
+  const exportUrl = api.exportCallsUrl(filters, { funnel_stage: stage });
 
   return (
     <>
