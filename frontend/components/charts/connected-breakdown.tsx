@@ -105,6 +105,10 @@ export default function ConnectedBreakdown({ data, total, filters }: Props) {
               end:   filters.end.toISOString(),
               funnel_stage: s.funnelStage,
             });
+            // Carry forward vendor/campaign selections so the calls page
+            // doesn't silently widen the filter on click-through.
+            for (const v of (filters.vendor_ids || [])) q.append('vendor_ids', v);
+            for (const c of (filters.campaign_ids || [])) q.append('campaign_ids', c);
             return (
               <Link key={s.key} href={`/calls?${q.toString()}`} className="block">
                 {inner}
