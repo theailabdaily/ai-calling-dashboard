@@ -105,6 +105,10 @@ async def export_calls(
             extra.append(and_(is_connected, is_interested, wants_callback))
         elif funnel_stage == "callback_only":
             extra.append(and_(is_connected, wants_callback, ~is_interested))
+        elif funnel_stage == "interested_only":
+            extra.append(and_(is_connected, is_interested, ~wants_callback))
+        elif funnel_stage == "no_intent":
+            extra.append(and_(is_connected, ~is_interested, ~wants_callback))
         # Legacy aliases
         elif funnel_stage == "hotleads":
             extra.append(and_(is_connected, or_(is_interested, wants_callback)))
