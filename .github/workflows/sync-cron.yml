@@ -1,33 +1,71 @@
 name: Sync vendors + keep Render awake
 
-# Runs every 15 minutes. Free tier of GitHub Actions = 2000 min/month.
-# A single run takes ~10 sec, so this uses ~30 min/month. Plenty of headroom.
+# Runs every 10 minutes. The previous version called the Render API to do
+# the sync, but Render free tier reaps workers after ~50s of inactivity
+# and the Hunar pull can take 5+ minutes — workers were getting killed
+# mid-flight, leaving zombie 'running' rows in sync_runs and stale data.
 #
-# This both:
-#   1. Runs the sync (so we don't depend on APScheduler).
-#   2. Pings the Render free instance frequently enough that it never goes to sleep.
+# This version runs the Python sync script directly inside the GH Actions
+# runner (15-min default timeout, plenty for our use). Render is only
+# pinged to keep its dyno warm for the dashboard reads.
+#
+# REQUIRED REPOSITORY SECRETS (Settings → Secrets and variables → Actions):
+#   DATABASE_URL        Supabase Postgres URL (postgresql+asyncpg://...)
+#                       — same one Render uses, copy from Render env
+#   HUNAR_API_KEY       Hunar Voice API key
+#                       — same one Render uses, copy from Render env
+#   API_BASE            https://ai-calling-dashboard-api.onrender.com
+#                       (used only for the keep-warm ping, optional)
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch:        # allow manual trigger from GitHub UI
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+# Cancel an in-flight run if a new one is scheduled — avoids two syncs
+# colliding on the database. The first one is killed; the new one starts fresh.
+concurrency:
+  group: vendor-sync
+  cancel-in-progress: true
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 14
+    defaults:
+      run:
+        working-directory: backend
+
     steps:
-      - name: Trigger Hunar sync
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Wake Render dyno (best-effort, non-blocking)
+        if: ${{ env.API_BASE != '' }}
         env:
-          API_BASE: ${{ secrets.API_BASE }}                    # https://your-app.onrender.com
-          DASHBOARD_USERNAME: ${{ secrets.DASHBOARD_USERNAME }}
-          DASHBOARD_PASSWORD: ${{ secrets.DASHBOARD_PASSWORD }}
+          API_BASE: ${{ secrets.API_BASE }}
+        # Don't fail the sync if Render is slow/down — the dashboard wake-up
+        # is a nice-to-have, the sync itself is what matters here.
+        continue-on-error: true
         run: |
-          set -e
-          AUTH=$(echo -n "$DASHBOARD_USERNAME:$DASHBOARD_PASSWORD" | base64)
-          # Health check first (also wakes the dyno)
-          curl -fsS "$API_BASE/health" > /dev/null
-          # Trigger sync
-          curl -fsS -X POST \
-            -H "Authorization: Basic $AUTH" \
-            "$API_BASE/api/vendors/hunar/sync"
-          echo "Sync triggered"
+          curl -fsS -m 30 "$API_BASE/health" > /dev/null && echo "render woke" || echo "render ping failed (non-fatal)"
+
+      - name: Run Hunar sync
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          HUNAR_API_KEY: ${{ secrets.HUNAR_API_KEY }}
+          # No spammy logs in CI, but still capture the per-run summary
+          LOG_LEVEL: INFO
+          PYTHONUNBUFFERED: '1'
+        run: |
+          python -m scripts.run_sync --vendor hunar
