@@ -57,6 +57,13 @@ function filtersFromUrl(sp: URLSearchParams): Filters {
     const d = new Date(endStr);
     if (!isNaN(d.getTime())) base.end = d;
   }
+  // Carry vendor / campaign selections through deep-links from the overview
+  // page. URL format is repeated params (?vendor_ids=a&vendor_ids=b) which
+  // is what URLSearchParams.getAll returns natively.
+  const vendorIds = sp.getAll('vendor_ids');
+  if (vendorIds.length) base.vendor_ids = vendorIds;
+  const campaignIds = sp.getAll('campaign_ids');
+  if (campaignIds.length) base.campaign_ids = campaignIds;
   return base;
 }
 
@@ -102,6 +109,11 @@ function CallsPageInner() {
   const [failedOnly, setFailedOnly] = useState(searchParams.get('failed_only') === 'true');
   const [statusFilter, setStatusFilter] = useState<string>('');
   const [pickupFilter, setPickupFilter] = useState<string>('');
+  // Funnel stage from URL — set when user clicks a tile/funnel stage on the
+  // overview page. Stored in state (not just read from searchParams) so it
+  // (a) goes into the queryKey for cache invalidation, (b) can be cleared
+  // via the active-filter chip without a navigation.
+  const [funnelStage, setFunnelStage] = useState<string>(searchParams.get('funnel_stage') || '');
   const [sortBy, setSortBy] = useState<SortKey>('when');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
@@ -109,6 +121,7 @@ function CallsPageInner() {
   useEffect(() => {
     setOnlyInterested(searchParams.get('only_interested') === 'true');
     setFailedOnly(searchParams.get('failed_only') === 'true');
+    setFunnelStage(searchParams.get('funnel_stage') || '');
     setFilters(filtersFromUrl(new URLSearchParams(searchParams.toString())));
     setPage(1);
   }, [searchParams]);
@@ -130,7 +143,7 @@ function CallsPageInner() {
   };
 
   const calls = useQuery({
-    queryKey: ['calls', filters, debouncedSearch, page, onlyRecording, onlyInterested, failedOnly, statusFilter, pickupFilter, sortBy, sortOrder],
+    queryKey: ['calls', filters, debouncedSearch, page, onlyRecording, onlyInterested, failedOnly, statusFilter, pickupFilter, funnelStage, sortBy, sortOrder],
     queryFn: () => api.callsList({
       f: filters,
       page,
@@ -141,6 +154,7 @@ function CallsPageInner() {
       failed_only: failedOnly,
       status: statusFilter || undefined,
       answered_by: pickupFilter || undefined,
+      funnel_stage: funnelStage || undefined,
       sort_by: sortBy,
       sort_order: sortOrder,
     }),
@@ -158,7 +172,7 @@ function CallsPageInner() {
       only_with_recording: onlyRecording || undefined,
       only_interested: onlyInterested || undefined,
       failed_only: failedOnly || undefined,
-      funnel_stage: searchParams.get('funnel_stage') || undefined,
+      funnel_stage: funnelStage || undefined,
     });
     window.open(url, '_blank');
   };
@@ -166,9 +180,24 @@ function CallsPageInner() {
 
   const totalPages = calls.data ? Math.max(1, Math.ceil(calls.data.total / calls.data.page_size)) : 1;
 
+  // Friendly labels for the funnel_stage URL value — shown in the active-
+  // filter chip when arriving via a tile click on the overview page.
+  const FUNNEL_LABELS: Record<string, string> = {
+    leads:         'Leads dialed',
+    connected:     'Connected',
+    engaged:       'Engaged',
+    interested:    'Interested (HIGH/MEDIUM)',
+    callback:      'Wants callback',
+    top_priority:  'Top priority (Interested + Callback)',
+    callback_only: 'Callback only (no interest tag)',
+    hotleads:      'Hot leads (Interested OR Callback)',
+    followup:      'Wants callback',
+  };
+
   const activeDeepFilter =
-    failedOnly ? { label: 'Failed calls only', clear: () => setFailedOnly(false) } :
-    onlyInterested ? { label: 'Interested calls only', clear: () => setOnlyInterested(false) } :
+    failedOnly       ? { label: 'Failed calls only',                            clear: () => setFailedOnly(false) } :
+    onlyInterested   ? { label: 'Interested calls only',                        clear: () => setOnlyInterested(false) } :
+    funnelStage      ? { label: `Funnel: ${FUNNEL_LABELS[funnelStage] || funnelStage}`, clear: () => setFunnelStage('') } :
     null;
 
   return (
