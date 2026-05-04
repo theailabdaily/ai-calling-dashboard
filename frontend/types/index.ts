@@ -73,6 +73,8 @@ export type OverviewMetrics = {
   unique_callback_leads: number;
   unique_top_priority_leads: number;
   unique_callback_only_leads: number;
+  unique_interested_only_leads: number;
+  unique_no_intent_leads: number;
   attempts_per_lead: number;
   lead_conversion_rate: number;
   connected_breakdown: ConnectedBreakdown;
@@ -152,6 +154,8 @@ export type FunnelStageKey =
   | 'callback'
   | 'top_priority'
   | 'callback_only'
+  | 'interested_only'
+  | 'no_intent'
   // Legacy aliases — older bookmarks may still hit these
   | 'hotleads'
   | 'followup';
