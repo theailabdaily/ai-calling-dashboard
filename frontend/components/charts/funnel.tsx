@@ -6,7 +6,17 @@ import { fmt } from '@/lib/api';
 // Stable keys used by the click-through drill-down. Must stay in sync with
 // the `key` field returned by /api/overview/funnel and the funnel_stage
 // query param accepted by /api/calls and /api/export/calls.csv.
-export type FunnelStageKey = 'leads' | 'connected' | 'engaged' | 'hotleads';
+export type FunnelStageKey =
+  | 'leads'
+  | 'connected'
+  | 'engaged'
+  | 'interested'
+  | 'callback'
+  | 'top_priority'
+  | 'callback_only'
+  // Legacy — kept so old bookmarks don't 404
+  | 'hotleads'
+  | 'followup';
 
 type Props = {
   data: FunnelStage[];
@@ -35,9 +45,8 @@ export default function FunnelChart({ data, totalDials, onStageClick }: Props) {
         )}
       </div>
       <p className="text-xs text-surface-500 mb-1">
-        Lead-level. Each stage counts lead-attempts (one row per campaign × phone).
-        Drop-off is vs. each stage's parent — Hot leads is gated on Connected,
-        not Engaged.
+        Unique-lead basis. Each stage counts distinct phone numbers, not dial attempts.
+        Drop-off shown vs. each stage's parent — see the (i) on each stage for definition.
       </p>
       {totalDials != null && totalDials > 0 && top > 0 && (
         <p className="text-[11px] text-surface-400 mb-4 tabular-nums">
