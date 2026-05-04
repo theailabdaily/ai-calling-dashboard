@@ -14,6 +14,8 @@ export type FunnelStageKey =
   | 'callback'
   | 'top_priority'
   | 'callback_only'
+  | 'interested_only'
+  | 'no_intent'
   // Legacy — kept so old bookmarks don't 404
   | 'hotleads'
   | 'followup';
