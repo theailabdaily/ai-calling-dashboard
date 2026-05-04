@@ -46,6 +46,36 @@ class AgentOut(BaseModel):
         from_attributes = True
 
 
+class ConnectedBreakdown(BaseModel):
+    """The 474 Connected calls partitioned by interest_level (mutually
+    exclusive — sums to connected_calls). Drives the stacked bar chart."""
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    not_covered: int = 0
+    not_available: int = 0
+    unclassified: int = 0
+
+
+class UnreachedBreakdown(BaseModel):
+    """Lead-attempts we did NOT connect with — includes the 436 in-progress
+    bucket that's currently invisible on the dashboard. Sum equals
+    row_count - connected_calls."""
+    in_progress: int = 0
+    not_connected: int = 0
+    voicemail: int = 0
+    failed: int = 0
+
+
+class DuplicateCampaign(BaseModel):
+    """One campaign's footprint inside the cross-campaign duplicate set.
+    `shared_leads` = number of duplicate phones that appear in this campaign."""
+    campaign_id: str
+    campaign_name: str
+    started_at: str | None = None
+    shared_leads: int = 0
+
+
 class OverviewMetrics(BaseModel):
     total_calls: int
     # row_count = lead-attempts in slice (one row per campaign × phone). Used
@@ -57,9 +87,9 @@ class OverviewMetrics(BaseModel):
     engaged_calls: int
     interested_calls: int
     follow_up_calls: int
-    # Hot leads = connected AND (interested OR follow-up). Drives the
-    # bottom-of-funnel tile and the funnel stage. See _is_hot_lead in
-    # services/metrics.py for the SQL truth.
+    # Hot leads = connected AND (interested OR follow-up). Kept for backward
+    # compat with old funnel consumers; new UI uses Interested + Callback
+    # as separate signals plus a Top-priority intersection.
     hot_lead_calls: int = 0
     connection_rate: float
     engagement_rate: float
@@ -67,12 +97,28 @@ class OverviewMetrics(BaseModel):
     follow_up_rate: float
     hot_lead_rate: float = 0.0
     conversion_rate: float
-    # Lead-level metrics — additive, do not change call-based rates above
+    # Lead-level metrics — additive, do not change call-based rates above.
+    # The new funnel runs entirely on these.
     unique_leads: int = 0
     unique_connected_leads: int = 0
+    unique_engaged_leads: int = 0
     unique_interested_leads: int = 0
+    unique_callback_leads: int = 0
+    unique_top_priority_leads: int = 0       # Interested AND Callback
+    unique_callback_only_leads: int = 0      # Callback NOT also Interested
     attempts_per_lead: float = 0.0
     lead_conversion_rate: float = 0.0
+    # Visual breakdowns — populate the charts below the funnel.
+    connected_breakdown: ConnectedBreakdown = ConnectedBreakdown()
+    unreached_breakdown: UnreachedBreakdown = UnreachedBreakdown()
+    unreached_total: int = 0
+    # Cross-campaign duplicate leads — surfaces accidental re-uploads where
+    # the same phone got dialed in two campaigns. 0 when the user filters
+    # to a single campaign. Drives the "Duplicates" card.
+    duplicate_leads: int = 0
+    duplicate_rows: int = 0
+    duplicate_dial_attempts: int = 0
+    duplicate_campaigns: list[DuplicateCampaign] = []
 
 
 class TimeBucket(BaseModel):
