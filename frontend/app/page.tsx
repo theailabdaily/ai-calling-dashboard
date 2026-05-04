@@ -27,13 +27,20 @@ const initialFilters: Filters = {
   campaign_ids: [],
 };
 
-// Build a /calls deep-link that carries the current date window
+// Build a /calls deep-link that carries the FULL filter state — date window
+// plus vendor/campaign selections plus any extra params (funnel_stage, etc.)
+// the caller wants to layer on. Without this, clicking a tile while a single
+// vendor is selected would silently widen the calls page back to "all vendors".
 function buildCallsLink(filters: Filters, params: Record<string, string>): string {
   const q = new URLSearchParams({
     start: filters.start.toISOString(),
     end: filters.end.toISOString(),
     ...params,
   });
+  // Repeated params (?vendor_ids=a&vendor_ids=b) — matches what filtersFromUrl
+  // expects on the receiving side via URLSearchParams.getAll.
+  for (const v of (filters.vendor_ids || [])) q.append('vendor_ids', v);
+  for (const c of (filters.campaign_ids || [])) q.append('campaign_ids', c);
   return `/calls?${q.toString()}`;
 }
 
