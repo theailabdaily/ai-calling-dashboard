@@ -146,7 +146,22 @@ function CallsPageInner() {
     }),
   });
 
-  const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
+  // Export the EXACT slice the user is looking at — every in-table filter
+  // (search, status, pickup, recording, interested, failed, funnel stage)
+  // is forwarded to the backend. Without this, clicking Export downloads
+  // far more rows than the table shows and leads to silent data confusion.
+  const handleExport = () => {
+    const url = api.exportCallsUrl(filters, {
+      search: debouncedSearch || undefined,
+      status: statusFilter || undefined,
+      answered_by: pickupFilter || undefined,
+      only_with_recording: onlyRecording || undefined,
+      only_interested: onlyInterested || undefined,
+      failed_only: failedOnly || undefined,
+      funnel_stage: searchParams.get('funnel_stage') || undefined,
+    });
+    window.open(url, '_blank');
+  };
   const insights = callsInsights(calls.data);
 
   const totalPages = calls.data ? Math.max(1, Math.ceil(calls.data.total / calls.data.page_size)) : 1;
