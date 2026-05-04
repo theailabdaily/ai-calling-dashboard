@@ -136,6 +136,12 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     _intr_phone     = case((and_(_is_connected, _is_interested), _valid_phone))
     _cb_phone       = case((and_(_is_connected, _has_follow_up), _valid_phone))
     _topprio_phone  = case((and_(_is_connected, _is_interested, _has_follow_up), _valid_phone))
+    # Mutually-exclusive sales-action buckets — sliced from Connected so each
+    # connected lead lands in exactly one bucket. Sum equals connected_calls.
+    # Drives the "Sales action breakdown" cards under the funnel.
+    _intr_only_phone = case((and_(_is_connected, _is_interested,         ~_has_follow_up), _valid_phone))
+    _cb_only_phone   = case((and_(_is_connected, ~_is_interested,         _has_follow_up), _valid_phone))
+    _no_intent_phone = case((and_(_is_connected, ~_is_interested,        ~_has_follow_up), _valid_phone))
 
     # Connected breakdown by interest_level (mutually exclusive — uses the
     # row's interest_level, not "best across attempts". For the connected
@@ -184,6 +190,9 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         func.count(distinct(_intr_phone)).label("unique_interested_leads"),
         func.count(distinct(_cb_phone)).label("unique_callback_leads"),
         func.count(distinct(_topprio_phone)).label("unique_top_priority_leads"),
+        func.count(distinct(_intr_only_phone)).label("unique_interested_only_leads"),
+        func.count(distinct(_cb_only_phone)).label("unique_callback_only_leads_q"),
+        func.count(distinct(_no_intent_phone)).label("unique_no_intent_leads"),
         # Connected breakdown — row counts per interest bucket (sum to connected_calls)
         func.sum(case((_conn_high, 1), else_=0)).label("conn_high"),
         func.sum(case((_conn_medium, 1), else_=0)).label("conn_medium"),
@@ -208,10 +217,14 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     unique_interested = int(row.unique_interested_leads or 0)
     unique_callback = int(row.unique_callback_leads or 0)
     unique_top_priority = int(row.unique_top_priority_leads or 0)
-    # "Callback only" = callback leads minus those who are also interested.
-    # By inclusion-exclusion. These are the lower-quality-but-still-asking-
-    # to-be-contacted leads sales might otherwise miss.
-    unique_callback_only = max(unique_callback - unique_top_priority, 0)
+    # The 4 mutually-exclusive sales-action buckets, all from SQL directly
+    # (not inclusion-exclusion arithmetic). Each connected lead lands in
+    # EXACTLY one. Sum equals unique_connected modulo 2 unclassified leads
+    # whose interest_level is NULL — those fall into no_intent. So the four
+    # buckets together strictly equal unique_connected.
+    unique_interested_only = int(row.unique_interested_only_leads or 0)
+    unique_callback_only   = int(row.unique_callback_only_leads_q or 0)
+    unique_no_intent       = int(row.unique_no_intent_leads or 0)
     connected = int(row.connected_calls or 0)
     failed = int(row.failed_calls or 0)
     engaged = int(row.engaged_calls or 0)
@@ -318,6 +331,8 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         "unique_callback_leads": unique_callback,
         "unique_top_priority_leads": unique_top_priority,
         "unique_callback_only_leads": unique_callback_only,
+        "unique_interested_only_leads": unique_interested_only,
+        "unique_no_intent_leads": unique_no_intent,
         "connected_calls": connected,
         "failed_calls": failed,
         "avg_duration_seconds": float(row.avg_duration_sec or 0),
@@ -388,32 +403,33 @@ async def calls_over_time(db: AsyncSession, filters: MetricFilters, bucket: str 
 # All stages are unique-lead counts (one phone = one count per stage).
 # ---------------------------------------------------------------------------
 async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
-    """Conversion funnel — strict subset, every stage in unique-lead basis.
+    """Conversion funnel — clean 3-stage linear narrative, all in unique-lead basis.
 
-    Top = unique phones in the slice. Each subsequent stage is a strict
-    subset of the previous one in semantic meaning (a lead can't be in
-    Connected without being in Leads, etc.).
+        Unique leads → Connected → Engaged
 
-    Why we dropped the old "Hot leads" union (interested OR callback):
-    - It mixed two independent signals into one number, hiding the
-      distribution. Sales actually wants to know which leads are
-      HIGH/MEDIUM-interest separately from who asked for callback.
-    - Showed 178 = "interested OR callback" but the user asked the right
-      question: where did each signal sit individually?
+    Why only 3 stages and not the previous 5:
+    The old funnel ended in `Top priority` (Interested AND Callback). That
+    forced the funnel to choose between Interested and Callback as the
+    "fourth stage", which obscured the fact that they're mutually-exclusive
+    sales-action buckets and Top priority is just one of three options.
 
-    The new bottom stage "Top priority" = both signals = lowest-noise
-    list for sales to action first. Wider Callback list lives outside
-    the funnel as a sibling card so it doesn't disappear.
+    The 3-stage funnel tells the macro story (reach → pickup → real
+    conversation). The granular breakdown of "what happened in those
+    conversations" is rendered separately by the frontend as 4 mutually-
+    exclusive cards (Interested only / Top priority / Callback only /
+    No intent), which all sum back to Connected. That keeps the funnel
+    visually clean while preserving every lead's home in the breakdown.
+
+    Engaged isn't strictly a parent of the action-bucket cards (a few rare
+    Hunar edge cases assign interest_level/callback without an ENGAGED tag),
+    so it stays in the funnel as a quality gate but doesn't drive the
+    breakdown — the breakdown sums to Connected, not Engaged.
     """
     m = await compute_overview_metrics(db, filters)
-    leads        = int(m.get("unique_leads")              or 0)
-    connected    = int(m.get("unique_connected_leads")    or 0)
-    engaged      = int(m.get("unique_engaged_leads")      or 0)
-    interested   = int(m.get("unique_interested_leads")   or 0)
-    top_priority = int(m.get("unique_top_priority_leads") or 0)
+    leads     = int(m.get("unique_leads")           or 0)
+    connected = int(m.get("unique_connected_leads") or 0)
+    engaged   = int(m.get("unique_engaged_leads")   or 0)
 
-    # Each stage's parent is the stage immediately above it — funnel is
-    # genuinely linear / strict-subset now. No sibling-of-Connected weirdness.
     stages = [
         {
             "key": "leads",
@@ -443,30 +459,10 @@ async def call_funnel(db: AsyncSession, filters: MetricFilters) -> list[dict[str
             "count": engaged,
             "_parent": connected,
             "definition": (
-                "Connected leads who actively engaged in the conversation "
-                "(Hunar's engagement_status=ENGAGED on at least one attempt). "
-                "Different from interest — engagement = stayed on the call."
-            ),
-        },
-        {
-            "key": "interested",
-            "stage": "Interested (HIGH/MEDIUM)",
-            "count": interested,
-            "_parent": connected,  # not nested under Engaged — independent slice
-            "definition": (
-                "Connected leads tagged HIGH or MEDIUM interest_level by "
-                "Hunar's classifier. The qualified-intent pool."
-            ),
-        },
-        {
-            "key": "top_priority",
-            "stage": "Top priority",
-            "count": top_priority,
-            "_parent": interested,
-            "definition": (
-                "Leads who are BOTH Interested (HIGH/MEDIUM) AND asked for a "
-                "callback (next_step_interest=CALLBACK). The lowest-noise, "
-                "highest-intent list — call these first."
+                "Connected leads who had a real back-and-forth with the bot "
+                "(engagement_status=ENGAGED on at least one attempt). Quality "
+                "gate — tells you whether the bot got a fair listen, not "
+                "whether the prospect was interested."
             ),
         },
     ]
