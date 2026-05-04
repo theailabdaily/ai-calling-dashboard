@@ -48,16 +48,24 @@ class AgentOut(BaseModel):
 
 class OverviewMetrics(BaseModel):
     total_calls: int
+    # row_count = lead-attempts in slice (one row per campaign × phone). Used
+    # internally as the rate denominator and exposed for transparency.
+    row_count: int = 0
     connected_calls: int
     failed_calls: int
     avg_duration_seconds: float
     engaged_calls: int
     interested_calls: int
     follow_up_calls: int
+    # Hot leads = connected AND (interested OR follow-up). Drives the
+    # bottom-of-funnel tile and the funnel stage. See _is_hot_lead in
+    # services/metrics.py for the SQL truth.
+    hot_lead_calls: int = 0
     connection_rate: float
     engagement_rate: float
     interest_rate: float
     follow_up_rate: float
+    hot_lead_rate: float = 0.0
     conversion_rate: float
     # Lead-level metrics — additive, do not change call-based rates above
     unique_leads: int = 0
