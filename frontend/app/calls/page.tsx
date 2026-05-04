@@ -183,15 +183,17 @@ function CallsPageInner() {
   // Friendly labels for the funnel_stage URL value — shown in the active-
   // filter chip when arriving via a tile click on the overview page.
   const FUNNEL_LABELS: Record<string, string> = {
-    leads:         'Leads dialed',
-    connected:     'Connected',
-    engaged:       'Engaged',
-    interested:    'Interested (HIGH/MEDIUM)',
-    callback:      'Wants callback',
-    top_priority:  'Top priority (Interested + Callback)',
-    callback_only: 'Callback only (no interest tag)',
-    hotleads:      'Hot leads (Interested OR Callback)',
-    followup:      'Wants callback',
+    leads:           'Leads dialed',
+    connected:       'Connected',
+    engaged:         'Engaged',
+    interested:      'Interested (HIGH/MEDIUM)',
+    callback:        'Wants callback',
+    top_priority:    'Top priority (Interested + Callback)',
+    interested_only: 'Interested only (no callback ask)',
+    callback_only:   'Callback only (no interest tag)',
+    no_intent:       'Connected, no positive signal',
+    hotleads:        'Hot leads (Interested OR Callback)',
+    followup:        'Wants callback',
   };
 
   const activeDeepFilter =
