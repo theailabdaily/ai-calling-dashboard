@@ -1,203 +1,467 @@
-"""
-Calls list + detail endpoints.
-
-The list endpoint is the entry point for QA workflows: filter, search by phone
-or name, click into a call. Server-side pagination because we expect 100k+ rows.
-"""
+"""Pydantic response models — the public API contract."""
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.api._filters import parse_filters
-from app.database import get_db
-from app.models import Agent, CallLog, Campaign, Vendor
-from app.schemas import CallDetail, CallListItem, CallListPage
-from app.services.metrics import MetricFilters
-
-router = APIRouter(prefix="/api/calls", tags=["calls"])
+from pydantic import BaseModel
 
 
-@router.get("", response_model=CallListPage)
-async def list_calls(
-    filters: MetricFilters = Depends(parse_filters),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
-    search: str | None = Query(None, description="Match against name / phone"),
-    status: str | None = Query(None),
-    answered_by: str | None = Query(None),
-    only_with_recording: bool = Query(False),
-    only_interested: bool = Query(False),
-    failed_only: bool = Query(False),
-    funnel_stage: str | None = Query(None, description="connected | engaged | interested | followup"),
-    sort_by: str = Query("when", description="when | duration | status"),
-    sort_order: str = Query("desc", description="asc | desc"),
-    db: AsyncSession = Depends(get_db),
-):
-    base = (
-        select(
-            CallLog,
-            Vendor.name.label("vendor_name"),
-            Campaign.name.label("campaign_name"),
-            Agent.name.label("agent_name"),
-        )
-        .join(Vendor, Vendor.id == CallLog.vendor_id)
-        .outerjoin(Campaign, Campaign.id == CallLog.campaign_id)
-        .outerjoin(Agent, Agent.id == CallLog.agent_id)
-    )
-    base = filters.apply(base)
+class VendorOut(BaseModel):
+    id: UUID
+    slug: str
+    name: str
+    is_active: bool
 
-    extra = []
-    if search:
-        s = f"%{search}%"
-        extra.append(or_(CallLog.callee_name.ilike(s), CallLog.mobile_number.ilike(s)))
-    if status:
-        extra.append(CallLog.lifecycle_status == status.upper())
-    if answered_by:
-        extra.append(CallLog.answered_by == answered_by.upper())
-    if only_with_recording:
-        extra.append(CallLog.recording_url.isnot(None))
-    if only_interested:
-        extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
-    if failed_only:
-        extra.append(CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")))
-
-    # Funnel stage filter — for the "click on funnel stage" drill-down
-    if funnel_stage:
-        is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
-        if funnel_stage == "leads":
-            # Top-of-funnel — every lead in the slice. No additional filter.
-            pass
-        elif funnel_stage == "connected":
-            extra.append(is_connected)
-        elif funnel_stage == "engaged":
-            extra.append(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
-        elif funnel_stage == "hotleads":
-            # Buying-intent signal of any kind — matches _is_hot_lead in
-            # services/metrics.py. Keep these two definitions in lockstep.
-            extra.append(and_(
-                is_connected,
-                or_(
-                    func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
-                    func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
-                ),
-            ))
-        # Legacy stage names — kept for backward compatibility with any
-        # bookmarked deep-links from before the funnel restructure.
-        # Both now redirect into hotleads' definition.
-        elif funnel_stage == "interested":
-            extra.append(and_(
-                is_connected,
-                func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
-            ))
-        elif funnel_stage == "followup":
-            extra.append(and_(
-                is_connected,
-                func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
-            ))
-
-    if extra:
-        base = base.where(and_(*extra))
-
-    # Total count (separate query — we want paginated rows, not all rows)
-    count_stmt = select(func.count()).select_from(base.subquery())
-    total = (await db.execute(count_stmt)).scalar_one()
-
-    # Sorting — map sort_by name to column. Default to started_at DESC.
-    sort_col = {
-        "when": CallLog.started_at,
-        "duration": CallLog.duration_seconds,
-        "status": CallLog.lifecycle_status,
-    }.get(sort_by, CallLog.started_at)
-    direction = sort_col.asc() if sort_order == "asc" else sort_col.desc()
-    if sort_by == "when":
-        direction = direction.nullslast() if sort_order == "desc" else direction.nullsfirst()
-
-    rows_stmt = (
-        base.order_by(direction)
-            .limit(page_size)
-            .offset((page - 1) * page_size)
-    )
-    rows = (await db.execute(rows_stmt)).all()
-
-    items = []
-    for row in rows:
-        c: CallLog = row[0]
-        # Hunar JSONB schema: interest_level (HIGH/MEDIUM/LOW) and follow_up_time
-        interested = c.result.get("interest_level") if isinstance(c.result, dict) else None
-        follow_up_raw = c.result.get("follow_up_time") if isinstance(c.result, dict) else None
-        # Hunar uses "NA" / "NOT AVAILABLE" / "Not Covered" as null sentinels — collapse those
-        follow_up = follow_up_raw if follow_up_raw and follow_up_raw.upper() not in ("NA", "NOT AVAILABLE", "NOT COVERED") else None
-        items.append(CallListItem(
-            id=c.id,
-            vendor_name=row.vendor_name,
-            campaign_name=row.campaign_name,
-            agent_name=row.agent_name,
-            callee_name=c.callee_name,
-            mobile_number=c.mobile_number,
-            status=c.status,
-            lifecycle_status=c.lifecycle_status,
-            answered_by=c.answered_by,
-            engagement_status=c.engagement_status,
-            duration_seconds=float(c.duration_seconds) if c.duration_seconds else None,
-            started_at=c.started_at,
-            has_recording=bool(c.recording_url),
-            interested=str(interested) if interested is not None else None,
-            follow_up_at=str(follow_up) if follow_up is not None else None,
-        ))
-
-    return CallListPage(items=items, total=int(total or 0), page=page, page_size=page_size)
+    class Config:
+        from_attributes = True
 
 
-@router.get("/{call_id}", response_model=CallDetail)
-async def get_call(call_id: UUID, db: AsyncSession = Depends(get_db)):
-    stmt = (
-        select(
-            CallLog,
-            Vendor.name.label("vendor_name"),
-            Campaign.name.label("campaign_name"),
-            Agent.name.label("agent_name"),
-        )
-        .join(Vendor, Vendor.id == CallLog.vendor_id)
-        .outerjoin(Campaign, Campaign.id == CallLog.campaign_id)
-        .outerjoin(Agent, Agent.id == CallLog.agent_id)
-        .where(CallLog.id == call_id)
-    )
-    row = (await db.execute(stmt)).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Call not found")
+class CampaignOut(BaseModel):
+    id: UUID
+    name: str
+    display_name: str | None = None   # "{date} — {vendor} — {name}"
+    vendor_id: UUID
+    vendor_name: str | None = None
+    vendor_request_id: str
+    agent_id: UUID | None
+    started_at: datetime | None
+    expected_calls: int | None
 
-    c: CallLog = row[0]
-    return CallDetail(
-        id=c.id,
-        vendor_id=c.vendor_id,
-        vendor_name=row.vendor_name,
-        vendor_call_id=c.vendor_call_id,
-        campaign_id=c.campaign_id,
-        campaign_name=row.campaign_name,
-        agent_id=c.agent_id,
-        agent_name=row.agent_name,
-        callee_name=c.callee_name,
-        mobile_number=c.mobile_number,
-        from_phone_number=c.from_phone_number,
-        language=c.language,
-        status=c.status,
-        lifecycle_status=c.lifecycle_status,
-        engagement_status=c.engagement_status,
-        answered_by=c.answered_by,
-        call_ended_by=c.call_ended_by,
-        duration_seconds=float(c.duration_seconds) if c.duration_seconds else None,
-        duration_minutes=float(c.duration_minutes) if c.duration_minutes else None,
-        user_speech_duration=float(c.user_speech_duration) if c.user_speech_duration else None,
-        max_retries=c.max_retries,
-        retry_count=c.retry_count,
-        retries_left=c.retries_left,
-        recording_url=c.recording_url,
-        custom_data=c.custom_data or {},
-        result=c.result or {},
-        started_at=c.started_at,
-        ended_at=c.ended_at,
-    )
+    class Config:
+        from_attributes = True
+
+
+class AgentOut(BaseModel):
+    id: UUID
+    vendor_id: UUID
+    vendor_agent_id: str
+    name: str
+    language: str | None
+    voice_persona: str | None
+    result_schema: dict[str, Any]
+
+    class Config:
+        from_attributes = True
+
+
+class ConnectedBreakdown(BaseModel):
+    """The 474 Connected calls partitioned by interest_level (mutually
+    exclusive — sums to connected_calls). Drives the stacked bar chart."""
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    not_covered: int = 0
+    not_available: int = 0
+    unclassified: int = 0
+
+
+class UnreachedBreakdown(BaseModel):
+    """Lead-attempts we did NOT connect with — includes the 436 in-progress
+    bucket that's currently invisible on the dashboard. Sum equals
+    row_count - connected_calls."""
+    in_progress: int = 0
+    not_connected: int = 0
+    voicemail: int = 0
+    failed: int = 0
+
+
+class DuplicateCampaign(BaseModel):
+    """One campaign's footprint inside the cross-campaign duplicate set.
+    `shared_leads` = number of duplicate phones that appear in this campaign."""
+    campaign_id: str
+    campaign_name: str
+    started_at: str | None = None
+    shared_leads: int = 0
+
+
+class OverviewMetrics(BaseModel):
+    total_calls: int
+    # row_count = lead-attempts in slice (one row per campaign × phone). Used
+    # internally as the rate denominator and exposed for transparency.
+    row_count: int = 0
+    connected_calls: int
+    failed_calls: int
+    avg_duration_seconds: float
+    engaged_calls: int
+    interested_calls: int
+    follow_up_calls: int
+    # Hot leads = connected AND (interested OR follow-up). Kept for backward
+    # compat with old funnel consumers; new UI uses Interested + Callback
+    # as separate signals plus a Top-priority intersection.
+    hot_lead_calls: int = 0
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+    follow_up_rate: float
+    hot_lead_rate: float = 0.0
+    conversion_rate: float
+    # Lead-level metrics — additive, do not change call-based rates above.
+    # The new funnel runs entirely on these.
+    unique_leads: int = 0
+    unique_connected_leads: int = 0
+    unique_engaged_leads: int = 0
+    unique_interested_leads: int = 0
+    unique_callback_leads: int = 0
+    unique_top_priority_leads: int = 0       # Interested AND Callback
+    unique_callback_only_leads: int = 0      # Callback NOT also Interested
+    attempts_per_lead: float = 0.0
+    lead_conversion_rate: float = 0.0
+    # Visual breakdowns — populate the charts below the funnel.
+    connected_breakdown: ConnectedBreakdown = ConnectedBreakdown()
+    unreached_breakdown: UnreachedBreakdown = UnreachedBreakdown()
+    unreached_total: int = 0
+    # Cross-campaign duplicate leads — surfaces accidental re-uploads where
+    # the same phone got dialed in two campaigns. 0 when the user filters
+    # to a single campaign. Drives the "Duplicates" card.
+    duplicate_leads: int = 0
+    duplicate_rows: int = 0
+    duplicate_dial_attempts: int = 0
+    duplicate_campaigns: list[DuplicateCampaign] = []
+
+
+class TimeBucket(BaseModel):
+    bucket: str | None
+    total: int
+    connected: int
+    interested: int
+
+
+class HourBucket(BaseModel):
+    hour: int
+    total_calls: int
+    connected_calls: int
+    engaged_calls: int
+    interested_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+
+
+class DowBucket(BaseModel):
+    dow: int                 # 1=Mon ... 7=Sun (ISODOW)
+    dow_name: str            # "Mon", "Tue", ...
+    total_calls: int
+    connected_calls: int
+    engaged_calls: int
+    interested_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+
+
+class HeatmapCell(BaseModel):
+    dow: int
+    dow_name: str
+    hour: int
+    total_calls: int
+    connected_calls: int
+    engaged_calls: int
+    interested_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+
+
+class VendorHourSplit(BaseModel):
+    vendor_id: str
+    vendor_name: str
+    hours: list[HourBucket]
+
+
+class CampaignHourSplit(BaseModel):
+    campaign_id: str
+    campaign_name: str
+    display_name: str | None = None
+    hours: list[HourBucket]
+
+
+class HourlyInsights(BaseModel):
+    hour_breakdown: list[HourBucket]
+    dow_breakdown:  list[DowBucket]
+    heatmap:        list[HeatmapCell]
+    by_vendor:      list[VendorHourSplit]
+    by_campaign:    list[CampaignHourSplit]
+
+
+class FunnelStage(BaseModel):
+    """One stage of the conversion funnel.
+
+    `key` is a stable identifier for filter/drill-down ('connected', 'engaged',
+    'hotleads'). `stage` is the human label. `definition` explains what's
+    counted — surfaced as a tooltip in the UI so users don't have to guess.
+    `rate_of_previous` is the drop-off vs. the stage above (None for the top
+    stage); `rate_of_top` is the cumulative survival rate from the top.
+    """
+    key: str
+    stage: str
+    count: int
+    definition: str
+    rate_of_previous: float | None = None
+    rate_of_top: float = 0.0
+
+
+class VendorRow(BaseModel):
+    vendor_id: str
+    vendor_slug: str
+    vendor_name: str
+    total_calls: int
+    connected_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+    follow_up_rate: float
+    # Lead-level — additive
+    unique_leads: int = 0
+    attempts_per_lead: float = 0.0
+
+
+class CampaignRow(BaseModel):
+    campaign_id: str
+    campaign_name: str
+    display_name: str | None = None   # "{date} — {vendor} — {name}"
+    vendor_id: str
+    vendor_name: str | None = None
+    started_at: str | None
+    total_calls: int
+    connected_calls: int
+    interested_calls: int
+    connection_rate: float
+    interest_rate: float
+
+
+class CallListItem(BaseModel):
+    id: UUID
+    vendor_name: str
+    campaign_name: str | None
+    agent_name: str | None
+    callee_name: str | None
+    mobile_number: str | None
+    status: str
+    lifecycle_status: str
+    answered_by: str
+    engagement_status: str
+    duration_seconds: float | None
+    started_at: datetime | None
+    has_recording: bool
+    interested: str | None       # surfaced from result JSONB for the list
+    follow_up_at: str | None
+
+
+class CallListPage(BaseModel):
+    items: list[CallListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class CallDetail(BaseModel):
+    id: UUID
+    vendor_id: UUID
+    vendor_name: str
+    vendor_call_id: str
+    campaign_id: UUID | None
+    campaign_name: str | None
+    agent_id: UUID | None
+    agent_name: str | None
+
+    callee_name: str | None
+    mobile_number: str | None
+    from_phone_number: str | None
+    language: str | None
+
+    status: str
+    lifecycle_status: str
+    engagement_status: str
+    answered_by: str
+    call_ended_by: str
+
+    duration_seconds: float | None
+    duration_minutes: float | None
+    user_speech_duration: float | None
+
+    max_retries: int
+    retry_count: int
+    retries_left: int
+
+    recording_url: str | None
+    custom_data: dict[str, Any]
+    result: dict[str, Any]
+
+    started_at: datetime | None
+    ended_at: datetime | None
+
+
+class AgentPerformanceRow(BaseModel):
+    agent_id: str
+    agent_name: str
+    vendor_name: str
+    language: str | None
+    voice_persona: str | None
+    total_calls: int
+    connected_calls: int
+    avg_duration_seconds: float
+    connection_rate: float
+    engagement_rate: float
+    interest_rate: float
+    follow_up_rate: float
+
+
+class TriggerCampaignRequest(BaseModel):
+    vendor_slug: str
+    vendor_agent_id: str         # the vendor's agent ID (from /api/agents)
+    sheet_id: str
+    worksheet_name: str | None = None
+    campaign_name: str | None = None
+    max_recipients: int | None = None    # safety cap
+
+
+class TriggerCampaignResponse(BaseModel):
+    status: str
+    request_id: str
+    sheet_rows_inserted: int
+    recipients_pushed: int
+    vendor_response: dict[str, Any] | None = None
+    warning: str | None = None
+
+
+class PushRecipient(BaseModel):
+    callee_name: str
+    mobile_number: str
+    custom_data: dict[str, str] | None = None
+
+
+class PushRecipientsRequest(BaseModel):
+    vendor_slug: str
+    vendor_agent_id: str
+    campaign_name: str | None = None
+    recipients: list[PushRecipient]
+
+
+class OutcomeRow(BaseModel):
+    outcome: str
+    count: int
+    pct: float
+
+
+class OutcomeDistribution(BaseModel):
+    by_call: list[OutcomeRow]
+    by_lead: list[OutcomeRow]
+
+
+class AttemptsRow(BaseModel):
+    attempts: int        # total dial attempts on the lead (retry_count + 1, summed across their rows)
+    leads: int           # unique leads that received exactly this many attempts
+    connected: int       # of those leads, how many ever picked up (HUMAN + COMPLETED)
+    pct_of_leads: float  # leads / total_leads (share of cohort by size)
+    connect_rate: float  # connected / leads (cohort pickup rate)
+
+
+class AttemptsDistribution(BaseModel):
+    rows: list[AttemptsRow]
+    total_leads: int
+    total_connected: int
+    total_calls: int
+
+
+# ---------------------------------------------------------------------------
+# Ledger / activity log — manual journal of "what we did" (gave leads, made
+# campaign, changed prompt). Each entry can optionally link to a campaign;
+# when it does, the GET endpoint joins live call_logs stats so the user can
+# compare what they sent (leads_total) to what vendor actually dialed.
+# ---------------------------------------------------------------------------
+
+LEDGER_ENTRY_TYPES = ("leads_given", "campaign_created", "note", "config_change")
+
+
+class LedgerLiveStats(BaseModel):
+    """Live join from call_logs for the linked campaign — what really happened."""
+    total_calls: int
+    unique_leads: int
+    connected: int
+    interested: int
+    avg_duration_seconds: float
+
+
+class LedgerEntryIn(BaseModel):
+    entry_type: str  # validated against LEDGER_ENTRY_TYPES in the route
+    title: str
+    occurred_at: datetime | None = None  # defaults to now() server-side
+    vendor_id: UUID | None = None
+    campaign_id: UUID | None = None
+    leads_total: int | None = None
+    leads_unique: int | None = None
+    notes: str | None = None
+    metadata: dict[str, Any] = {}
+
+
+class LedgerEntryUpdate(BaseModel):
+    """All-optional partial update."""
+    entry_type: str | None = None
+    title: str | None = None
+    occurred_at: datetime | None = None
+    vendor_id: UUID | None = None
+    campaign_id: UUID | None = None
+    leads_total: int | None = None
+    leads_unique: int | None = None
+    notes: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class LedgerEntryOut(BaseModel):
+    id: UUID
+    entry_type: str
+    title: str
+    occurred_at: datetime
+
+    # Denormalized for display — saves the frontend a separate vendors/campaigns lookup
+    vendor_id: UUID | None
+    vendor_name: str | None = None
+    campaign_id: UUID | None
+    campaign_name: str | None = None
+    campaign_vendor_request_id: str | None = None
+
+    leads_total: int | None
+    leads_unique: int | None
+    notes: str | None
+    metadata: dict[str, Any] = {}
+
+    # Populated when campaign_id is set; null otherwise
+    live_stats: LedgerLiveStats | None = None
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class LedgerListResponse(BaseModel):
+    items: list[LedgerEntryOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class PendingCampaign(BaseModel):
+    """A campaign that has no ledger entry attached yet — operational debt the
+    Activity Log surfaces so every campaign ends up with a journal note."""
+    campaign_id: UUID
+    campaign_name: str
+    vendor_id: UUID
+    vendor_name: str
+    vendor_request_id: str
+    started_at: datetime | None = None
+    expected_calls: int | None = None
+    # Live counts so the user can see "this campaign already dialed 487 unique
+    # leads — go log it" right in the banner without a second fetch.
+    total_calls: int = 0
+    unique_leads: int = 0
+
+
+class PendingCampaignsResponse(BaseModel):
+    items: list[PendingCampaign]
+    total: int
+    days: int  # window the backend used (echoed back for clarity)
