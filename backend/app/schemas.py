@@ -106,6 +106,10 @@ class OverviewMetrics(BaseModel):
     unique_callback_leads: int = 0
     unique_top_priority_leads: int = 0       # Interested AND Callback
     unique_callback_only_leads: int = 0      # Callback NOT also Interested
+    # Mutually-exclusive sales-action buckets — every connected lead is in
+    # exactly one. Sum (~) connected_calls.
+    unique_interested_only_leads: int = 0    # Interested NOT Callback
+    unique_no_intent_leads: int = 0          # Connected, no positive signal
     attempts_per_lead: float = 0.0
     lead_conversion_rate: float = 0.0
     # Visual breakdowns — populate the charts below the funnel.
