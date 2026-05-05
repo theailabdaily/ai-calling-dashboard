@@ -78,14 +78,20 @@ class HunarAdapter(VendorAdapter):
     # -----------------------------------------------------------------
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        # Hunar's /calls/ endpoint can take several minutes to respond when
+        # scanning large datasets — observed 7 min in the wild for page 2.
+        # Connect/write timeouts stay tight so we fail fast if Hunar is down,
+        # but read timeout is generous enough for a slow scan to complete.
+        timeout = httpx.Timeout(connect=10.0, read=600.0, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.get(url, headers=self._headers, params=params)
             r.raise_for_status()
             return r.json()
 
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        timeout = httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(url, headers=self._headers, json=body)
             r.raise_for_status()
             return r.json()
@@ -123,8 +129,13 @@ class HunarAdapter(VendorAdapter):
         self,
         *,
         since: datetime | None = None,
-        page_size: int = 200,
+        page_size: int = 50,
     ) -> AsyncIterator[NormalizedCall]:
+        # Smaller pages observed to be MUCH faster than page_size=200 in
+        # practice — Hunar's /calls/ scan time appears to grow non-linearly
+        # with batch size. 50 records typically returns in seconds; 200 has
+        # been observed to take 7+ minutes during peak load. More HTTP
+        # round-trips, but each one bounded.
         page = 1
         while True:
             data = await self._get("/calls/", params={"page": page, "page_size": page_size})
