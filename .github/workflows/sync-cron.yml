@@ -17,21 +17,27 @@ name: Sync vendors + keep Render awake
 #   API_BASE            https://ai-calling-dashboard-api.onrender.com
 #                       (used only for the keep-warm ping, optional)
 
+# Cron interval: every 30 min instead of 10. Hunar's /calls/ has been
+# observed taking up to 7 minutes per page, so 10-min cycles were too
+# aggressive — they'd cancel each other before completing. 30 min is a
+# safer cadence given the API's actual response times.
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
-# Cancel an in-flight run if a new one is scheduled — avoids two syncs
-# colliding on the database. The first one is killed; the new one starts fresh.
+# Concurrency: do NOT cancel in-progress runs anymore. Previously a slow
+# sync would get killed by the next scheduled run, leaving zombie rows in
+# sync_runs. Now we let a long sync finish; the next one queues behind it.
+# Only one sync runs at a time per the group key.
 concurrency:
   group: vendor-sync
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: backend
