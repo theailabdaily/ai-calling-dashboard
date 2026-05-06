@@ -9,7 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, calls, exports, hourly, ingestion, ledger, overview, vendors
+from app.api import agents, calls, dod_leads, exports, hourly, ingestion, ledger, overview, vendors
 from app.config import get_settings
 from app.jobs.sync import sync_all_vendors
 
@@ -58,6 +58,7 @@ app.include_router(exports.router)
 app.include_router(ingestion.router)
 app.include_router(hourly.router)
 app.include_router(ledger.router)
+app.include_router(dod_leads.router)
 
 
 @app.get("/health")
