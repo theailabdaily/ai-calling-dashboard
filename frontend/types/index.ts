@@ -390,3 +390,31 @@ export type PendingCampaignsResponse = {
   total: number;
   days: number;
 };
+
+// DoD Leads — Day-over-Day breakdown by upload date with campaign expansion
+export type DodLeadCampaign = {
+  campaign_id: string;
+  campaign_name: string;
+  total_leads: number;
+  top_priority: number;
+  interested_only: number;
+  callback_only: number;
+  no_intent: number;
+  unreached: number;
+};
+
+export type DodLeadDay = {
+  date: string;            // ISO calendar date in IST, e.g. "2026-05-05"
+  total_leads: number;
+  top_priority: number;
+  interested_only: number;
+  callback_only: number;
+  no_intent: number;
+  unreached: number;
+  campaigns: DodLeadCampaign[];
+};
+
+export type DodLeadsResponse = {
+  days: DodLeadDay[];
+  total_days: number;
+};
