@@ -1,5 +1,6 @@
 import type {
-  Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow, Filters,
+  Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow,
+  DodLeadsResponse, Filters,
   FunnelStage, HourBucket, HourlyInsights, LedgerEntry, LedgerEntryInput, LedgerEntryType, LedgerListResponse,
   LedgerLiveStats, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, TimeBucket,
   TriggerCampaignRequest, TriggerCampaignResponse, Vendor, VendorRow,
@@ -206,6 +207,12 @@ export const api = {
   // leads_total / leads_unique when the user picks a campaign.
   ledgerCampaignStats: (campaignId: string): Promise<LedgerLiveStats> =>
     jget<LedgerLiveStats>(`/api/ledger/campaign-stats/${campaignId}`),
+
+  // DoD Leads — leads grouped by upload date with campaign-level expansion.
+  // No filter args in v1 — the table is naturally small (one row per upload
+  // day) and the page renders the full history.
+  dodLeads: (): Promise<DodLeadsResponse> =>
+    jget<DodLeadsResponse>(`/api/dod-leads`),
 };
 
 // Number formatting helpers (Indian locale)
