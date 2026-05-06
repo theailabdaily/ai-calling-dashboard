@@ -2,12 +2,13 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText } from 'lucide-react';
+import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText, CalendarDays } from 'lucide-react';
 import { cn } from '@/lib/api';
 
 const NAV = [
   { href: '/',                label: 'Overview',          icon: LayoutDashboard },
   { href: '/hourly-insights', label: 'Hourly Insights',   icon: Clock },
+  { href: '/dod-leads',       label: 'DoD Leads',         icon: CalendarDays },
   { href: '/vendors',         label: 'Vendor Analysis',   icon: Users },
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/calls',           label: 'Call Logs',         icon: Phone },
