@@ -1,6 +1,6 @@
 'use client';
 import { useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import Link from 'next/link';
 import { ChevronDown, ChevronRight, CalendarDays } from 'lucide-react';
 import { api, fmt } from '@/lib/api';
@@ -9,12 +9,22 @@ import type { DodLeadDay, DodLeadCampaign } from '@/types';
 // Sales-action bucket → matching funnel_stage URL param + display name.
 // Single source of truth: changing this updates BOTH the column header AND
 // the deep-link query string, so they can never drift apart.
-const BUCKETS = [
-  { key: 'top_priority',    label: 'Top Priority',     hint: 'Interested + Callback', accent: true  },
-  { key: 'interested_only', label: 'Interested only',  hint: 'HIGH/MEDIUM, no callback ask',          },
-  { key: 'callback_only',   label: 'Callback only',    hint: 'Asked callback, low/unclear interest',  },
-  { key: 'no_intent',       label: 'No intent',        hint: 'Connected but no positive signal',      },
-] as const;
+// Explicitly typed so TS treats `accent` as a uniform optional field across
+// all entries. Using `as const` made each item a narrow tuple member where
+// `accent` only existed on the first entry — broke the build.
+type Bucket = {
+  key: 'top_priority' | 'interested_only' | 'callback_only' | 'no_intent';
+  label: string;
+  hint: string;
+  accent?: boolean;
+};
+
+const BUCKETS: Bucket[] = [
+  { key: 'top_priority',    label: 'Top Priority',     hint: 'Interested + Callback', accent: true },
+  { key: 'interested_only', label: 'Interested only',  hint: 'HIGH/MEDIUM, no callback ask' },
+  { key: 'callback_only',   label: 'Callback only',    hint: 'Asked callback, low/unclear interest' },
+  { key: 'no_intent',       label: 'No intent',        hint: 'Connected but no positive signal' },
+];
 
 // Format an IST ISO date ("2026-05-05") for display. Uses en-IN locale so
 // dd MMM yyyy reads naturally for this team. We construct as UTC midnight
@@ -121,7 +131,7 @@ export default function DodLeadsPage() {
                   const expandable = camps.length > 0;
 
                   return (
-                    <>
+                    <Fragment key={day.date}>
                       {/* Day-level row — clickable to expand. The whole row
                           carries the toggle (UX: bigger hit area). Inside,
                           numeric cells stop propagation so they navigate
@@ -198,7 +208,7 @@ export default function DodLeadsPage() {
                           ))}
                         </tr>
                       ))}
-                    </>
+                    </Fragment>
                   );
                 })}
               </tbody>
