@@ -63,19 +63,44 @@ function campaignLink(campaignId: string, funnel_stage: string): string {
   return `/calls?${q.toString()}`;
 }
 
+// Total-row link — passes a wide "all time" date range (matching the
+// FilterBar's All time preset) so the user sees every matching lead
+// regardless of the Call Logs page's default filter window.
+function totalLink(funnel_stage: string): string {
+  const start = new Date('2020-01-01T00:00:00+05:30').toISOString();
+  const end = new Date().toISOString();
+  const q = new URLSearchParams({ start, end, funnel_stage });
+  return `/calls?${q.toString()}`;
+}
+
 export default function DodLeadsPage() {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Accordion state — only one date can be expanded at a time. Clicking
+  // a different row auto-collapses the previously open one. Clicking the
+  // same row again toggles it closed.
+  const [expanded, setExpanded] = useState<string | null>(null);
   const dod = useQuery({ queryKey: ['dod-leads'], queryFn: () => api.dodLeads() });
 
   const toggle = (date: string) => {
-    setExpanded(prev => {
-      const next = new Set(prev);
-      next.has(date) ? next.delete(date) : next.add(date);
-      return next;
-    });
+    setExpanded(prev => (prev === date ? null : date));
   };
 
   const days = dod.data?.days ?? [];
+
+  // Column totals — straight sums across all days. Note: when a phone
+  // appears in multiple same-window campaigns (cross-day duplicates),
+  // total_leads here can exceed the unique-phone count shown on Overview.
+  // The bucket sums match Overview as long as no phone changed buckets
+  // between days; small drift is normal and not a bug.
+  const totals = days.reduce(
+    (acc, d) => ({
+      total_leads:     acc.total_leads     + d.total_leads,
+      top_priority:    acc.top_priority    + d.top_priority,
+      interested_only: acc.interested_only + d.interested_only,
+      callback_only:   acc.callback_only   + d.callback_only,
+      no_intent:       acc.no_intent       + d.no_intent,
+    }),
+    { total_leads: 0, top_priority: 0, interested_only: 0, callback_only: 0, no_intent: 0 },
+  );
 
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-[1400px] mx-auto">
@@ -126,7 +151,7 @@ export default function DodLeadsPage() {
               </thead>
               <tbody>
                 {days.map(day => {
-                  const isOpen = expanded.has(day.date);
+                  const isOpen = expanded === day.date;
                   const camps = day.campaigns ?? [];
                   const expandable = camps.length > 0;
 
@@ -211,6 +236,32 @@ export default function DodLeadsPage() {
                     </Fragment>
                   );
                 })}
+
+                {/* Totals row — column sums across all days. Visually
+                    separated by a thicker top border + tinted background.
+                    Numeric cells hyperlink to the all-time view of that
+                    bucket on Call Logs so the user can pull a global list.
+                    Date cell is non-interactive (no chevron, no click).  */}
+                <tr className="border-t-2 border-surface-300 bg-surface-50/80 font-semibold">
+                  <td></td>
+                  <td className="py-3 px-3 text-brand-navy uppercase text-[11px] tracking-wider">
+                    Total
+                  </td>
+                  <td className="py-3 px-3 text-right tabular-nums text-brand-navy">
+                    {fmt.int(totals.total_leads)}
+                  </td>
+                  {BUCKETS.map(b => (
+                    <td key={b.key} className="py-3 px-3 text-right tabular-nums">
+                      <CellLink
+                        href={totalLink(b.key)}
+                        count={(totals as any)[b.key] as number}
+                        total={totals.total_leads}
+                        accent={!!b.accent}
+                        bold
+                      />
+                    </td>
+                  ))}
+                </tr>
               </tbody>
             </table>
           </div>
