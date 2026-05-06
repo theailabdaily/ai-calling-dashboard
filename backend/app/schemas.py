@@ -469,3 +469,41 @@ class PendingCampaignsResponse(BaseModel):
     items: list[PendingCampaign]
     total: int
     days: int  # window the backend used (echoed back for clarity)
+
+
+# ---------------------------------------------------------------------------
+# DoD Leads — Day-over-Day breakdown of leads with sales-action buckets
+# ---------------------------------------------------------------------------
+class DodLeadCampaign(BaseModel):
+    """One campaign's contribution to a single day's lead total. All counts
+    are unique-phone counts within the campaign — same definitions used by
+    the Sales action breakdown row on Overview."""
+    campaign_id: str
+    campaign_name: str
+    total_leads: int
+    top_priority: int        # connected AND interested AND callback
+    interested_only: int     # connected AND interested AND NOT callback
+    callback_only: int       # connected AND callback AND NOT interested
+    no_intent: int           # connected, neither signal
+    unreached: int           # NOT connected (in-progress + failed + voicemail)
+
+
+class DodLeadDay(BaseModel):
+    """One upload day (IST calendar) with embedded campaign breakdown.
+
+    Counts at this level are unique phones within the day. When a phone
+    appears in multiple same-day campaigns, sum(campaigns) > day total —
+    expected, surface in the UI if needed."""
+    date: str                # ISO calendar date in IST, e.g. "2026-05-05"
+    total_leads: int
+    top_priority: int
+    interested_only: int
+    callback_only: int
+    no_intent: int
+    unreached: int
+    campaigns: list[DodLeadCampaign] = []
+
+
+class DodLeadsResponse(BaseModel):
+    days: list[DodLeadDay]
+    total_days: int
