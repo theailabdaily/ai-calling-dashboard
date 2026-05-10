@@ -29,6 +29,9 @@ export default function MobileNav() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
+  // BDA lookup tool runs as a separate mini-app — hide the main-app nav
+  if (pathname?.startsWith('/lookup')) return null;
+
   // Close drawer when route changes (the user just tapped a nav item)
   useEffect(() => { setOpen(false); }, [pathname]);
 
