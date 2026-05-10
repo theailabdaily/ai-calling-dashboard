@@ -10,14 +10,9 @@
  *   2. Lookup tool: 'ai-lookup.vercel.app' (overridable via LOOKUP_HOSTNAME env)
  *      → No auth — BDAs paste the URL and use it.
  *      → Every non-lookup, non-_next, non-api path is rewritten to /lookup.
- *        Even if a BDA manually types /calls or /ledger, they only ever see
- *        the lookup UI.
- *      → /api/lookup and /api/lookup/recording/* pass through (the page needs
- *        them); everything else under /api is rewritten to a 404-equivalent
- *        path so BDAs can't poke other endpoints.
- *
- * Both behaviors are server-enforced — typing a different path or messing
- * with cookies can't break out of the lookup-only sandbox.
+ *      → Sets x-is-lookup-host: 1 header so server components can render
+ *        without sidebar/mobile-nav (the rewrite-target /lookup is opaque
+ *        to client components which still see the original URL).
  */
 import { NextRequest, NextResponse } from 'next/server';
 
@@ -31,27 +26,38 @@ export function middleware(req: NextRequest) {
   if (host === LOOKUP_HOSTNAME) {
     // Allow Next.js internal asset routes through unconditionally
     if (pathname.startsWith('/_next')) {
-      return NextResponse.next();
+      const r = NextResponse.next();
+      r.headers.set('x-is-lookup-host', '1');
+      return r;
     }
 
-    // The lookup feature itself: page + its 2 backing endpoints
+    // Lookup feature itself: page + its 2 backing endpoints — pass through
+    // so the URL stays clean.
     if (
       pathname === '/lookup' ||
       pathname.startsWith('/lookup/') ||
       pathname === '/api/lookup' ||
       pathname.startsWith('/api/lookup/')
     ) {
-      return NextResponse.next();
+      const r = NextResponse.next();
+      r.headers.set('x-is-lookup-host', '1');
+      return r;
     }
 
-    // Everything else (typed /calls, /ledger, /api/overview/metrics, etc.)
-    // gets rewritten back to /lookup so URL stays clean and BDA only sees
-    // the lookup UI. For /api/* routes we rewrite to a path that returns
-    // 404 from the page handler — keeps it clear those endpoints are off
-    // limits without leaking which ones exist.
+    // Everything else gets rewritten back to /lookup. Set the header on
+    // both the request (so server components can read it) and the response.
     const url = req.nextUrl.clone();
     url.pathname = '/lookup';
-    return NextResponse.rewrite(url);
+    const r = NextResponse.rewrite(url, {
+      request: {
+        headers: new Headers({
+          ...Object.fromEntries(req.headers),
+          'x-is-lookup-host': '1',
+        }),
+      },
+    });
+    r.headers.set('x-is-lookup-host', '1');
+    return r;
   }
 
   // ---- Main hostname: basic auth ----
