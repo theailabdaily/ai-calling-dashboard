@@ -174,6 +174,12 @@ function ResultsView({ data }: { data: LookupResult }) {
           <Stat icon={<Clock size={14} />} label="Longest call" value={fmtDuration(summary.longest_duration_seconds)} />
         </div>
 
+        {summary.narrative && (
+          <div className="pt-1 border-t border-surface-100 mt-2">
+            <div className="text-[10px] uppercase tracking-wider text-surface-500 mb-1">Summary</div>
+            <p className="text-sm text-surface-800 leading-relaxed">{summary.narrative}</p>
+          </div>
+        )}
         {(summary.latest_objection || summary.latest_follow_up) && (
           <div className="pt-1 space-y-1.5 border-t border-surface-100 mt-2">
             {summary.latest_objection && (
@@ -264,6 +270,11 @@ function CallRow({ call, index }: { call: LookupCall; index: number }) {
             )}
           </div>
 
+          {call.summary && (
+            <div className="mt-2 text-xs text-surface-700 leading-relaxed border-l-2 border-brand-pink/30 pl-2.5">
+              {call.summary}
+            </div>
+          )}
           {(call.interest || call.objection_text || call.next_step || call.follow_up_at) && (
             <div className="mt-2 space-y-1 text-xs">
               {call.interest && (
