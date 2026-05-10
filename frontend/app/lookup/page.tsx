@@ -4,7 +4,7 @@ import { useMutation } from '@tanstack/react-query';
 import { format, formatDistanceToNow } from 'date-fns';
 import {
   Search, Phone, PlayCircle, PauseCircle, AlertCircle, CheckCircle2,
-  Clock, User, MessageSquare, Calendar, X,
+  Clock, MessageSquare, Calendar, X,
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
@@ -174,12 +174,36 @@ function ResultsView({ data }: { data: LookupResult }) {
           <Stat icon={<Clock size={14} />} label="Longest call" value={fmtDuration(summary.longest_duration_seconds)} />
         </div>
 
+        {/* Narrative — multi-paragraph BD brief.
+            Backend uses '**Heading**' markers and '\n\n' paragraph separators.
+            Headings render as bold uppercase section titles; the rest as paragraphs.
+            'whitespace-pre-line' preserves '\n' inside paragraphs (used for the
+            bullet list of questions). */}
         {summary.narrative && (
-          <div className="pt-1 border-t border-surface-100 mt-2">
-            <div className="text-[10px] uppercase tracking-wider text-surface-500 mb-1">Summary</div>
-            <p className="text-sm text-surface-800 leading-relaxed">{summary.narrative}</p>
+          <div className="pt-2 border-t border-surface-100 mt-2 space-y-2">
+            {summary.narrative.split('\n\n').map((para, i) => {
+              if (para.startsWith('**') && para.endsWith('**')) {
+                return (
+                  <h3
+                    key={i}
+                    className="text-xs font-bold text-brand-navy uppercase tracking-wider mt-3 first:mt-0"
+                  >
+                    {para.slice(2, -2)}
+                  </h3>
+                );
+              }
+              return (
+                <p
+                  key={i}
+                  className="text-sm text-surface-800 leading-relaxed whitespace-pre-line"
+                >
+                  {para}
+                </p>
+              );
+            })}
           </div>
         )}
+
         {(summary.latest_objection || summary.latest_follow_up) && (
           <div className="pt-1 space-y-1.5 border-t border-surface-100 mt-2">
             {summary.latest_objection && (
@@ -275,6 +299,7 @@ function CallRow({ call, index }: { call: LookupCall; index: number }) {
               {call.summary}
             </div>
           )}
+
           {(call.interest || call.objection_text || call.next_step || call.follow_up_at) && (
             <div className="mt-2 space-y-1 text-xs">
               {call.interest && (
