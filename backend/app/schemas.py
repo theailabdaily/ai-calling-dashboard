@@ -527,6 +527,7 @@ class LookupCall(BaseModel):
     next_step: str | None = None
     follow_up_at: str | None = None
     language: str | None = None
+    summary: str | None = None  # 1-2 sentence plain-English summary of this call
 
 
 class LookupSummary(BaseModel):
@@ -540,6 +541,7 @@ class LookupSummary(BaseModel):
     latest_follow_up: str | None
     first_call_at: datetime | None
     last_call_at: datetime | None
+    narrative: str | None = None  # plain-English overall summary across all calls
 
 
 class LookupResult(BaseModel):
