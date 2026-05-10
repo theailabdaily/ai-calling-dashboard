@@ -418,3 +418,45 @@ export type DodLeadsResponse = {
   days: DodLeadDay[];
   total_days: number;
 };
+
+// ---------------------------------------------------------------------------
+// BDA lookup tool types — phone-number search. Mirrors backend LookupResult
+// schema. NB: deliberately no vendor/agent/campaign IDs in this shape —
+// even the type system reinforces "BDAs don't see vendor".
+// ---------------------------------------------------------------------------
+
+export type LookupCall = {
+  id: string;            // opaque — only used to hit the recording proxy
+  when: string | null;
+  status: string;
+  answered_by: string;
+  duration_seconds: number;
+  retry_count: number;
+  has_recording: boolean;
+  interest: string | null;
+  objection_text: string | null;
+  next_step: string | null;
+  follow_up_at: string | null;
+  language: string | null;
+};
+
+export type LookupSummary = {
+  callee_name: string | null;
+  total_calls: number;
+  total_attempts: number;
+  connected_count: number;
+  longest_duration_seconds: number;
+  latest_interest: string | null;
+  latest_objection: string | null;
+  latest_follow_up: string | null;
+  first_call_at: string | null;
+  last_call_at: string | null;
+};
+
+export type LookupResult = {
+  normalized_phone: string | null;
+  input_phone: string;
+  found: boolean;
+  summary: LookupSummary | null;
+  calls: LookupCall[];
+};
