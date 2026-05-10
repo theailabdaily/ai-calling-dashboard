@@ -3,16 +3,13 @@ import './globals.css';
 import { Providers } from './providers';
 import Sidebar from '@/components/layout/sidebar';
 import MobileNav from '@/components/layout/mobile-nav';
+import MainContent from '@/components/layout/main-content';
 
 export const metadata: Metadata = {
   title: 'AI Calling Analytics — Testbook Supercoaching',
   description: 'Unified analytics across AI calling vendors',
 };
 
-// Viewport is now its own export in the App Router (Next 14+). This sets the
-// proper viewport tag so phones don't render the page at desktop width and
-// shrink it down — and it locks the initial scale so iOS Safari doesn't auto-
-// zoom on form-input focus.
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
@@ -26,14 +23,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <Providers>
           <div className="min-h-screen flex">
-            {/* Desktop sidebar — hidden below lg */}
+            {/* Desktop sidebar — hidden below lg AND on /lookup routes */}
             <Sidebar />
 
-            {/* Mobile-only top bar with hamburger; renders nothing on lg+ */}
+            {/* Mobile-only top bar with hamburger; null on lg+ AND on /lookup */}
             <MobileNav />
 
-            {/* Push content below the 56px mobile top bar; on lg+ no offset */}
-            <main className="flex-1 min-w-0 pt-14 lg:pt-0">{children}</main>
+            {/* Wrapper applies mobile-nav padding only when the mobile nav is rendered */}
+            <MainContent>{children}</MainContent>
           </div>
         </Providers>
       </body>
