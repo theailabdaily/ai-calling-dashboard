@@ -507,3 +507,44 @@ class DodLeadDay(BaseModel):
 class DodLeadsResponse(BaseModel):
     days: list[DodLeadDay]
     total_days: int
+
+
+# ---------------------------------------------------------------------------
+# Lookup tool — BDA phone-number search. Vendor identifiers deliberately
+# absent from the public response shape.
+# ---------------------------------------------------------------------------
+
+class LookupCall(BaseModel):
+    id: UUID  # opaque to BDA — only used by the recording-proxy endpoint
+    when: datetime | None
+    status: str
+    answered_by: str
+    duration_seconds: float
+    retry_count: int
+    has_recording: bool
+    interest: str | None = None
+    objection_text: str | None = None
+    next_step: str | None = None
+    follow_up_at: str | None = None
+    language: str | None = None
+
+
+class LookupSummary(BaseModel):
+    callee_name: str | None
+    total_calls: int
+    total_attempts: int          # SUM(retry_count + 1) across rows
+    connected_count: int
+    longest_duration_seconds: float
+    latest_interest: str | None
+    latest_objection: str | None
+    latest_follow_up: str | None
+    first_call_at: datetime | None
+    last_call_at: datetime | None
+
+
+class LookupResult(BaseModel):
+    normalized_phone: str | None  # null if input failed normalization
+    input_phone: str
+    found: bool
+    summary: LookupSummary | None
+    calls: list[LookupCall]
