@@ -213,6 +213,17 @@ export const api = {
   // day) and the page renders the full history.
   dodLeads: (): Promise<DodLeadsResponse> =>
     jget<DodLeadsResponse>(`/api/dod-leads`),
+
+  // BDA phone-number lookup — vendor-anonymous summary + per-call history.
+  lookup: (phone: string): Promise<LookupResult> =>
+    jget<LookupResult>(`/api/lookup?phone=${encodeURIComponent(phone)}`),
+
+  // Browser <audio> hits this URL. We don't fetch — the audio element does
+  // the GET so it can range-request properly. URL points to backend proxy
+  // which streams the recording so the underlying vendor URL never reaches
+  // the browser.
+  recordingUrl: (callId: string): string =>
+    `${API_BASE}/api/lookup/recording/${callId}`,
 };
 
 // Number formatting helpers (Indian locale)
@@ -225,14 +236,6 @@ export const fmt = {
     const s = Math.round(sec % 60);
     return m ? `${m}m ${s}s` : `${s}s`;
   },
-
-  lookup: (phone: string): Promise<LookupResult> =>
-    jget<LookupResult>(`/api/lookup?phone=${encodeURIComponent(phone)}`),
-
-  // Returns the URL the audio element should hit. We don't fetch — the
-  // browser <audio> element does the GET so it can range-request properly.
-  recordingUrl: (callId: string): string =>
-    `${API_BASE}/api/lookup/recording/${callId}`,
 };
 
 export function cn(...classes: (string | false | null | undefined)[]): string {
