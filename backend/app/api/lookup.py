@@ -6,6 +6,10 @@ Two endpoints:
 
 VENDOR/AGENT/CAMPAIGN identifiers are stripped from all responses.
 Recording URL is proxied so the underlying GCS/vendor URL never leaks.
+
+The `narrative` on the summary is BD-actionable: it skips low-signal volume
+info (e.g. 'picked up 1 of 1') and surfaces lead profile + signals + a
+tactical approach recommendation derived from objection/intent/interest.
 """
 from __future__ import annotations
 
@@ -35,7 +39,6 @@ _NON_DIGIT = re.compile(r"\D+")
 
 
 def normalize_phone(raw: str) -> str | None:
-    """Best-effort normalize Indian mobile to +91XXXXXXXXXX."""
     if not raw:
         return None
     digits = _NON_DIGIT.sub("", raw)
@@ -53,7 +56,7 @@ def normalize_phone(raw: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Rate limit (in-process; sufficient against typo loops, not adversaries)
+# Rate limit
 # ---------------------------------------------------------------------------
 _RATE_BUCKETS: dict[str, list[float]] = defaultdict(list)
 _RATE_WINDOW_SEC = 60.0
@@ -71,20 +74,18 @@ def _rate_check(ip: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Summary generation — turns the structured `result` JSONB into plain English
+# Phrase mappings — turn raw codes into BDA-friendly English
 # ---------------------------------------------------------------------------
-
-# Map raw codes to BDA-friendly phrases
 _OBJECTION_PHRASES = {
     "TIME": "said timing wasn't right",
     "NOT_INTERESTED": "not interested",
     "ALREADY_PREPARING": "already preparing on their own",
     "FEES": "raised concern about fees",
     "CAREER_CONFUSION": "unsure about career direction",
-    "AGE": "age concern",
-    "OTHER": None,                   # fall through to verbatim
-    "Not Covered": None,             # don't mention — means we didn't ask
-    "NOT AVAILABLE": None,           # didn't pick up
+    "AGE": "raised age-related concern",
+    "OTHER": None,
+    "Not Covered": None,
+    "NOT AVAILABLE": None,
 }
 
 _INTEREST_PHRASES = {
@@ -122,7 +123,6 @@ _NEXT_STEP_PHRASES = {
 
 
 def _clean(v: Any) -> str | None:
-    """Strip placeholder values like 'Not Answered', 'Not Covered', 'NA', empty strings."""
     if v is None:
         return None
     if not isinstance(v, str):
@@ -135,12 +135,11 @@ def _clean(v: Any) -> str | None:
     return s
 
 
+# ---------------------------------------------------------------------------
+# Per-call summary (description of what happened on a single call)
+# ---------------------------------------------------------------------------
 def _summarize_call(call: CallLog) -> str | None:
-    """Return a 1-2 sentence summary of what happened on this call.
-    Returns None if there's nothing meaningful to say (e.g. didn't pick up)."""
-    if call.lifecycle_status != "COMPLETED":
-        return None
-    if call.answered_by != "HUMAN":
+    if call.lifecycle_status != "COMPLETED" or call.answered_by != "HUMAN":
         return None
     r = call.result or {}
     if not r:
@@ -148,34 +147,21 @@ def _summarize_call(call: CallLog) -> str | None:
 
     parts: list[str] = []
 
-    # Lead profile (Schema A — SSC/Banking/UPSC NET)
+    # Profile bits (Schema A or B)
     subject = _clean(r.get("subject"))
-    target = _clean(r.get("target"))
+    target = _clean(r.get("target")) or _clean(r.get("current_goal"))
     attempt = _clean(r.get("attempt"))
     intent = _clean(r.get("preparation_intent"))
-
-    # Lead profile (Schema B — UPSC CSE)
-    current_goal = _clean(r.get("current_goal"))
-    target_year = _clean(r.get("target_year"))
     profile = _clean(r.get("profile"))
     prep_status = _clean(r.get("prep_status"))
     biggest_challenge = _clean(r.get("biggest_challenge"))
 
-    # Build the "who and what" clause
     profile_bits: list[str] = []
     if attempt and attempt in _ATTEMPT_PHRASES:
         profile_bits.append(_ATTEMPT_PHRASES[attempt])
     if target:
-        if subject:
-            profile_bits.append(f"preparing for {target} ({subject})")
-        else:
-            profile_bits.append(f"preparing for {target}")
-    elif current_goal:
-        if target_year:
-            profile_bits.append(f"preparing for {current_goal} ({target_year})")
-        else:
-            profile_bits.append(f"preparing for {current_goal}")
-    if profile and profile.lower() not in ("not answered",):
+        profile_bits.append(f"preparing for {target}" + (f" ({subject})" if subject else ""))
+    if profile:
         profile_bits.append(profile.lower())
     if intent and intent in _INTENT_PHRASES:
         profile_bits.append(_INTENT_PHRASES[intent])
@@ -185,17 +171,15 @@ def _summarize_call(call: CallLog) -> str | None:
     if profile_bits:
         parts.append("Lead is " + ", ".join(profile_bits) + ".")
 
-    # Engagement / interest signal
+    # Signals on this specific call
     sig_bits: list[str] = []
     interest = _clean(r.get("interest_level")) or _clean(r.get("upsc_interest"))
     engagement = _clean(r.get("engagement_level"))
     if interest:
-        phrase = _INTEREST_PHRASES.get(interest, f"{interest.lower()} interest")
-        sig_bits.append(f"showed {phrase}")
+        sig_bits.append("showed " + _INTEREST_PHRASES.get(interest, interest.lower() + " interest"))
     if engagement and engagement in _ENGAGEMENT_PHRASES:
         sig_bits.append(_ENGAGEMENT_PHRASES[engagement])
 
-    # Objection
     objection_type = _clean(r.get("objection_type"))
     objection_verbatim = _clean(r.get("objections_verbatim"))
     if objection_type:
@@ -203,46 +187,153 @@ def _summarize_call(call: CallLog) -> str | None:
         if phrase:
             sig_bits.append(phrase)
         elif objection_verbatim:
-            # Fall back to verbatim quote, capped at ~80 chars
             quoted = objection_verbatim[:80] + ("…" if len(objection_verbatim) > 80 else "")
             sig_bits.append(f'mentioned: "{quoted}"')
 
-    # Next step
     next_step = _clean(r.get("next_step_interest"))
-    if next_step and next_step in _NEXT_STEP_PHRASES:
-        ns_phrase = _NEXT_STEP_PHRASES[next_step]
-        if ns_phrase:
-            sig_bits.append(ns_phrase)
+    if next_step in _NEXT_STEP_PHRASES and _NEXT_STEP_PHRASES[next_step]:
+        sig_bits.append(_NEXT_STEP_PHRASES[next_step])
     follow_up = _clean(r.get("follow_up_time")) or _clean(r.get("callback_time"))
     if follow_up:
         sig_bits.append(f"follow-up at {follow_up}")
 
-    # Schema B: biggest_challenge is gold — surface it
     if biggest_challenge:
-        sig_bits.append(f'main challenge: {biggest_challenge.lower()}')
+        sig_bits.append(f"main challenge: {biggest_challenge.lower()}")
 
     if sig_bits:
         parts.append("On this call, " + ", ".join(sig_bits) + ".")
 
-    if not parts:
-        # Nothing structured but call did happen — last-ditch verbatim
-        if objection_verbatim:
-            return f'Lead said: "{objection_verbatim[:120]}"'
+    if not parts and objection_verbatim:
+        return f'Lead said: "{objection_verbatim[:120]}"'
+
+    return " ".join(parts) if parts else None
+
+
+# ---------------------------------------------------------------------------
+# BD-action recommendation (the "what should I do" sentence)
+# ---------------------------------------------------------------------------
+def _recommend_approach(call: CallLog | None) -> str | None:
+    """Tactical pitch + timing recommendation derived from latest connected call."""
+    if not call or not call.result:
+        return None
+    r = call.result
+    interest = (r.get("interest_level") or "").upper()
+    upsc_interest = (r.get("upsc_interest") or "").lower()
+    objection = (r.get("objection_type") or "").upper()
+    intent = (r.get("preparation_intent") or "").upper()
+    next_step = (r.get("next_step_interest") or "").upper()
+    follow_up = (r.get("follow_up_time") or r.get("callback_time") or "").strip()
+    follow_up_meaningful = bool(follow_up) and follow_up.upper() not in (
+        "NA", "N/A", "NOT ANSWERED", "NOT COVERED", "",
+    )
+    attempt = (r.get("attempt") or "").upper()
+
+    # Map UPSC-style interest into the same buckets as Schema A
+    if not interest and upsc_interest:
+        if "highly" in upsc_interest:
+            interest = "HIGH"
+        elif "interested" in upsc_interest:
+            interest = "MEDIUM"
+
+    pitch_parts: list[str] = []
+    timing_parts: list[str] = []
+
+    # Objection-driven pitch angle (highest signal field)
+    if objection == "TIME":
+        pitch_parts.append(
+            "don't pitch features — lead with time-efficiency: a structured plan "
+            "with realistic daily commitment (~2 hrs), PYQ analysis, focused mocks"
+        )
+    elif objection == "FEES":
+        pitch_parts.append(
+            "price-sensitive — lead with EMI options, scholarship eligibility, "
+            "and ROI vs offline coaching cost"
+        )
+    elif objection == "ALREADY_PREPARING":
+        pitch_parts.append(
+            "self-studying — don't position as replacement; sell test series, "
+            "mentorship, and doubt-clearing as supplements that fix gaps"
+        )
+    elif objection == "CAREER_CONFUSION":
+        pitch_parts.append(
+            "not in buying mindset — connect with a career counsellor first; "
+            "a sales pitch will backfire"
+        )
+    elif objection == "NOT_INTERESTED":
+        pitch_parts.append("low signal — move to WhatsApp nurture queue; do not dial again this week")
+    elif objection == "AGE":
+        pitch_parts.append(
+            "age concern — surface success stories of older qualifiers and emphasise "
+            "the syllabus is age-agnostic"
+        )
+
+    # Intent-based modifier (only if no strong objection picked up the angle)
+    if not pitch_parts:
+        if intent == "EXPLORING":
+            pitch_parts.append(
+                "not committed yet — share free content (webinar, sample lectures) "
+                "before any direct pitch"
+            )
+        elif intent == "SERIOUS":
+            pitch_parts.append("buyer-mode — direct pitch with specific differentiators is fine")
+
+    # Repeat-aspirant nuance (always relevant when present)
+    if attempt == "REPEAT_ATTEMPT":
+        pitch_parts.append(
+            "knows the exam — emphasise what's different this time "
+            "(weak-area analytics, mistake-pattern review)"
+        )
+
+    # Timing recommendation
+    if interest == "HIGH":
+        if follow_up_meaningful:
+            timing_parts.append(
+                f"hot lead — call at {follow_up} sharp with brochure + payment/scheduling link ready"
+            )
+        else:
+            timing_parts.append(
+                "hot lead — call within 24 hrs with brochure + payment/scheduling link ready"
+            )
+    elif next_step == "CALLBACK" and follow_up_meaningful:
+        timing_parts.append(f"call back at {follow_up} as committed")
+    elif next_step == "CALLBACK":
+        timing_parts.append(
+            "asked for a callback but no time committed — call tomorrow morning "
+            "before lead drifts"
+        )
+    elif interest == "LOW":
+        timing_parts.append(
+            "low priority — WhatsApp drip only; voice call only if engagement signal returns"
+        )
+
+    if not pitch_parts and not timing_parts:
         return None
 
-    return " ".join(parts)
+    bits: list[str] = []
+    if pitch_parts:
+        bits.append("Approach: " + "; ".join(pitch_parts) + ".")
+    if timing_parts:
+        bits.append("Timing: " + "; ".join(timing_parts) + ".")
+    return " ".join(bits)
 
 
+# ---------------------------------------------------------------------------
+# Overall narrative — BD-actionable summary across all calls
+# ---------------------------------------------------------------------------
 def _build_narrative(calls: list[CallLog]) -> str | None:
-    """Build a 2-3 sentence overall narrative across all calls."""
+    """Build a BD-actionable lead summary.
+
+    Format: [Optional volume note] [Profile] [Signal] [Approach + Timing]
+    Volume sentence is skipped unless it carries actionable signal
+    (e.g. never picked up despite many attempts).
+    """
     if not calls:
         return None
 
     total = len(calls)
-    connected = sum(1 for c in calls if c.lifecycle_status == "COMPLETED" and c.answered_by == "HUMAN")
-    not_connected = total - connected
-
-    # Pick the most recent connected call as the source for "where things stand"
+    connected = sum(
+        1 for c in calls if c.lifecycle_status == "COMPLETED" and c.answered_by == "HUMAN"
+    )
     latest_connected = next(
         (c for c in calls if c.lifecycle_status == "COMPLETED" and c.answered_by == "HUMAN"),
         None,
@@ -250,61 +341,89 @@ def _build_narrative(calls: list[CallLog]) -> str | None:
 
     parts: list[str] = []
 
-    # Volume sentence
-    if total == 1:
-        if connected == 1:
-            parts.append("Picked up on the only call so far.")
-        else:
-            parts.append("Has been called once but didn't pick up.")
-    else:
-        if connected == 0:
-            parts.append(f"Called {total} times, never picked up.")
-        elif not_connected == 0:
-            parts.append(f"Called {total} times, picked up every time.")
-        else:
-            parts.append(f"Called {total} times, picked up {connected}.")
+    # ---- Volume note — only when actionable ----
+    if connected == 0 and total >= 3:
+        parts.append(
+            f"Dialled {total} times, no pickups — lead is screening calls or unreachable."
+        )
+    elif connected == 0:
+        parts.append("Has not picked up any call so far.")
+    # else: skip — pickup count is already in the stat tiles above the narrative
 
-    # Profile from latest connected call
+    # ---- Profile + signal sentences (from latest connected call) ----
     if latest_connected and latest_connected.result:
         r = latest_connected.result
         target = _clean(r.get("target")) or _clean(r.get("current_goal"))
         subject = _clean(r.get("subject"))
         attempt = _clean(r.get("attempt"))
-        attempt_phrase = _ATTEMPT_PHRASES.get(attempt, "") if attempt else ""
+        intent = _clean(r.get("preparation_intent"))
+        profile = _clean(r.get("profile"))
+        prep_status = _clean(r.get("prep_status"))
+        biggest_challenge = _clean(r.get("biggest_challenge"))
 
-        if target:
-            who = []
-            if attempt_phrase:
-                who.append(attempt_phrase.capitalize())
-            else:
-                who.append("Aspirant")
-            if subject:
-                who.append(f"for {target} ({subject})")
-            else:
-                who.append(f"for {target}")
-            parts.append(" ".join(who) + ".")
+        # Profile sentence
+        profile_bits: list[str] = []
+        if attempt and attempt in _ATTEMPT_PHRASES:
+            profile_bits.append(_ATTEMPT_PHRASES[attempt].capitalize())
+        elif target:
+            profile_bits.append("Aspirant")
+        if target and subject:
+            profile_bits.append(f"for {target} ({subject})")
+        elif target:
+            profile_bits.append(f"for {target}")
+        if intent and intent in _INTENT_PHRASES:
+            profile_bits.append(_INTENT_PHRASES[intent])
+        elif prep_status:
+            profile_bits.append(prep_status.lower())
+        if profile:
+            profile_bits.append(profile.lower())
 
-        # Latest interest + objection
+        if profile_bits:
+            sentence = " ".join(profile_bits[:2])  # first two go together as core ID
+            if len(profile_bits) > 2:
+                sentence += ", " + ", ".join(profile_bits[2:])
+            parts.append(sentence + ".")
+
+        if biggest_challenge:
+            parts.append(f"Main challenge: {biggest_challenge.lower()}.")
+
+        # Signal sentence (what they said on the latest call)
+        signal_bits: list[str] = []
         interest = _clean(r.get("interest_level")) or _clean(r.get("upsc_interest"))
         objection_type = _clean(r.get("objection_type"))
+        objection_verbatim = _clean(r.get("objections_verbatim"))
         next_step = _clean(r.get("next_step_interest"))
         follow_up = _clean(r.get("follow_up_time")) or _clean(r.get("callback_time"))
 
-        latest_bits: list[str] = []
         if interest:
-            phrase = _INTEREST_PHRASES.get(interest, interest.lower() + " interest")
-            latest_bits.append(f"latest call showed {phrase}")
+            signal_bits.append(
+                "showed " + _INTEREST_PHRASES.get(interest, interest.lower() + " interest")
+            )
         if objection_type:
             obj_phrase = _OBJECTION_PHRASES.get(objection_type)
             if obj_phrase:
-                latest_bits.append(obj_phrase)
-        if next_step == "CALLBACK" and follow_up:
-            latest_bits.append(f"asked for callback at {follow_up}")
-        elif next_step == "CALLBACK":
-            latest_bits.append("asked for callback")
+                signal_bits.append(obj_phrase)
+            elif objection_verbatim:
+                quoted = objection_verbatim[:80] + ("…" if len(objection_verbatim) > 80 else "")
+                signal_bits.append(f'said "{quoted}"')
 
-        if latest_bits:
-            parts.append(", ".join(latest_bits).capitalize() + ".")
+        if next_step == "CALLBACK":
+            if follow_up:
+                signal_bits.append(f"asked for callback at {follow_up}")
+            else:
+                signal_bits.append("asked for callback (no time committed)")
+        elif next_step == "DEMO":
+            signal_bits.append("asked for a demo")
+        elif next_step == "ENROL":
+            signal_bits.append("ready to enrol")
+
+        if signal_bits:
+            parts.append("Last call: " + ", ".join(signal_bits) + ".")
+
+        # ---- Approach (the BD action) ----
+        approach = _recommend_approach(latest_connected)
+        if approach:
+            parts.append(approach)
 
     return " ".join(parts) if parts else None
 
@@ -422,7 +541,6 @@ async def get_recording(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Streams call recording through this backend so the underlying vendor URL is never exposed."""
     _rate_check(request.client.host if request.client else "unknown")
 
     call = (await db.execute(select(CallLog).where(CallLog.id == call_id))).scalar_one_or_none()
