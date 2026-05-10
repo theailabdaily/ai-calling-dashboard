@@ -2,7 +2,7 @@ import type {
   Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow,
   DodLeadsResponse, Filters,
   FunnelStage, HourBucket, HourlyInsights, LedgerEntry, LedgerEntryInput, LedgerEntryType, LedgerListResponse,
-  LedgerLiveStats, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, TimeBucket,
+  LedgerLiveStats, LookupResult, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, TimeBucket,
   TriggerCampaignRequest, TriggerCampaignResponse, Vendor, VendorRow,
 } from '@/types';
 
@@ -225,6 +225,14 @@ export const fmt = {
     const s = Math.round(sec % 60);
     return m ? `${m}m ${s}s` : `${s}s`;
   },
+
+  lookup: (phone: string): Promise<LookupResult> =>
+    jget<LookupResult>(`/api/lookup?phone=${encodeURIComponent(phone)}`),
+
+  // Returns the URL the audio element should hit. We don't fetch — the
+  // browser <audio> element does the GET so it can range-request properly.
+  recordingUrl: (callId: string): string =>
+    `${API_BASE}/api/lookup/recording/${callId}`,
 };
 
 export function cn(...classes: (string | false | null | undefined)[]): string {
