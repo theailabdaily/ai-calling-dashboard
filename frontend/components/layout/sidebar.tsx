@@ -19,6 +19,10 @@ const NAV = [
 // Desktop sidebar. Hidden on viewports below lg (1024px) — those use MobileNav.
 export default function Sidebar() {
   const pathname = usePathname();
+  // The /lookup routes are a separate, BDA-only mini-app — no nav, no
+  // analytics chrome. Render nothing here so the lookup page can own the
+  // entire viewport.
+  if (pathname?.startsWith('/lookup')) return null;
   return (
     <aside className="hidden lg:flex w-64 shrink-0 bg-black text-white min-h-screen flex-col sticky top-0 h-screen">
       <div className="p-5 border-b border-white/10">
