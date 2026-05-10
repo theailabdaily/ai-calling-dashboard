@@ -438,6 +438,7 @@ export type LookupCall = {
   next_step: string | null;
   follow_up_at: string | null;
   language: string | null;
+  summary: string | null;        // ← ADD THIS LINE
 };
 
 export type LookupSummary = {
@@ -451,6 +452,7 @@ export type LookupSummary = {
   latest_follow_up: string | null;
   first_call_at: string | null;
   last_call_at: string | null;
+  narrative: string | null;      // ← ADD THIS LINE
 };
 
 export type LookupResult = {
