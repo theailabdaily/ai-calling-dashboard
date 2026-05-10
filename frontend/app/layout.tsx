@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from 'next';
+import { headers } from 'next/headers';
 import './globals.css';
 import { Providers } from './providers';
 import Sidebar from '@/components/layout/sidebar';
@@ -18,18 +19,18 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  // Middleware sets x-is-lookup-host: 1 on requests coming from the
+  // lookup hostname. We use that to skip sidebar/mobile-nav entirely so
+  // BDAs see a standalone tool, not the analytics dashboard.
+  const isLookupHost = headers().get('x-is-lookup-host') === '1';
+
   return (
     <html lang="en">
       <body>
         <Providers>
           <div className="min-h-screen flex">
-            {/* Desktop sidebar — hidden below lg AND on /lookup routes */}
-            <Sidebar />
-
-            {/* Mobile-only top bar with hamburger; null on lg+ AND on /lookup */}
-            <MobileNav />
-
-            {/* Wrapper applies mobile-nav padding only when the mobile nav is rendered */}
+            {!isLookupHost && <Sidebar />}
+            {!isLookupHost && <MobileNav />}
             <MainContent>{children}</MainContent>
           </div>
         </Providers>
