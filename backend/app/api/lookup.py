@@ -1,706 +1,418 @@
-"""BDA phone-number lookup tool.
+'use client';
+import { useState, useRef } from 'react';
+import { useMutation } from '@tanstack/react-query';
+import { format, formatDistanceToNow } from 'date-fns';
+import {
+  Search, Phone, PlayCircle, PauseCircle, AlertCircle, CheckCircle2,
+  Clock, MessageSquare, Calendar, X,
+} from 'lucide-react';
 
-The narrative is structured as two clearly-labeled sections — 'What we know'
-(profile + last-call signals) and 'Approach' (strategic angle + subject-aware
-talking points + nurture questions). The narrative string uses '**heading**'
-markers and '\\n\\n' paragraph separators; the frontend parses these into
-proper section headings.
-"""
-from __future__ import annotations
+import { api } from '@/lib/api';
+import type { LookupResult, LookupCall } from '@/types';
 
-import re
-import time
-from collections import defaultdict
-from typing import Any
-from uuid import UUID
+// Stand-alone tool. No sidebar, no shared chrome, no vendor names anywhere
+// in the UI or in the API responses. Looks intentionally different from
+// the main analytics dashboard so a BDA can tell at a glance "this is the
+// lookup tool" and not the broader analytics product.
 
-import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+export default function LookupPage() {
+  const [phone, setPhone] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
 
-from app.database import get_db
-from app.models import CallLog
-from app.schemas import LookupCall, LookupResult, LookupSummary
+  const search = useMutation<LookupResult, Error, string>({
+    mutationFn: (p: string) => api.lookup(p),
+  });
 
-router = APIRouter(prefix="/api/lookup", tags=["lookup"])
+  const submit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (!phone.trim()) return;
+    search.mutate(phone.trim());
+  };
 
+  const clear = () => {
+    setPhone('');
+    search.reset();
+    inputRef.current?.focus();
+  };
 
-# ============================================================================
-# Phone normalization
-# ============================================================================
-_NON_DIGIT = re.compile(r"\D+")
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100">
+      {/* Header — distinct from main dashboard so BDAs know this is a different tool */}
+      <header className="bg-brand-navy text-white">
+        <div className="max-w-3xl mx-auto px-4 md:px-6 py-4 md:py-5 flex items-center gap-3">
+          <div className="w-9 h-9 rounded-lg bg-brand-pink/20 flex items-center justify-center shrink-0">
+            <Search size={18} />
+          </div>
+          <div>
+            <h1 className="text-lg md:text-xl font-semibold">Lead Lookup</h1>
+            <p className="text-xs text-white/60">Paste a phone number to see call history and recordings.</p>
+          </div>
+        </div>
+      </header>
 
+      <main className="max-w-3xl mx-auto px-4 md:px-6 py-5 md:py-8 space-y-4 md:space-y-5">
+        {/* Search bar */}
+        <form onSubmit={submit} className="card p-3 md:p-4">
+          <label className="text-xs font-medium text-surface-700 mb-1.5 block">Phone number</label>
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Phone size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-surface-400 pointer-events-none" />
+              <input
+                ref={inputRef}
+                type="tel"
+                inputMode="tel"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="9876543210 or +91 98765 43210"
+                className="w-full pl-9 pr-9 py-2.5 rounded-lg border border-surface-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
+                autoFocus
+              />
+              {phone && (
+                <button
+                  type="button"
+                  onClick={clear}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-surface-400 hover:text-surface-700 hover:bg-surface-100"
+                  aria-label="Clear"
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            <button
+              type="submit"
+              disabled={!phone.trim() || search.isPending}
+              className="btn bg-brand-pink text-white hover:bg-[#d92853] disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {search.isPending ? 'Searching…' : 'Search'}
+            </button>
+          </div>
+          <p className="text-xs text-surface-500 mt-2">
+            Any format works — with or without +91, spaces, or dashes.
+          </p>
+        </form>
 
-def normalize_phone(raw: str) -> str | None:
-    if not raw:
-        return None
-    digits = _NON_DIGIT.sub("", raw)
-    if len(digits) == 11 and digits.startswith("0"):
-        digits = digits[1:]
-    if len(digits) == 12 and digits.startswith("91"):
-        digits = digits[2:]
-    if len(digits) == 13 and digits.startswith("091"):
-        digits = digits[3:]
-    if len(digits) != 10 or digits[0] not in "6789":
-        return None
-    return "+91" + digits
+        {/* Error state */}
+        {search.isError && (
+          <div className="card p-4 border-red-200 bg-red-50 flex items-start gap-2">
+            <AlertCircle size={16} className="text-red-600 mt-0.5 shrink-0" />
+            <div className="text-sm text-red-900">
+              {search.error instanceof Error ? search.error.message : 'Lookup failed. Try again.'}
+            </div>
+          </div>
+        )}
 
+        {/* Results */}
+        {search.data && <ResultsView data={search.data} />}
 
-# ============================================================================
-# Rate limit
-# ============================================================================
-_RATE_BUCKETS: dict[str, list[float]] = defaultdict(list)
-_RATE_WINDOW_SEC = 60.0
-_RATE_MAX = 30
-
-
-def _rate_check(ip: str) -> None:
-    now = time.monotonic()
-    bucket = _RATE_BUCKETS[ip]
-    cutoff = now - _RATE_WINDOW_SEC
-    bucket[:] = [t for t in bucket if t > cutoff]
-    if len(bucket) >= _RATE_MAX:
-        raise HTTPException(status_code=429, detail="Too many lookups. Wait a moment.")
-    bucket.append(now)
-
-
-# ============================================================================
-# Helpers
-# ============================================================================
-def _clean(v: Any) -> str | None:
-    if v is None:
-        return None
-    if not isinstance(v, str):
-        return str(v) if v else None
-    s = v.strip()
-    if not s:
-        return None
-    if s.lower() in (
-        "not answered", "not covered", "not captured", "na", "n/a",
-        "not available", "unknown",
-    ):
-        return None
-    return s
-
-
-def _normalize_subject(s: str | None) -> str | None:
-    if not s:
-        return s
-    if s == s.upper() and len(s) > 4:
-        return s.title()
-    return s
-
-
-def _normalize_attempt(r: dict) -> str:
-    """Schema A uses 'REPEAT_ATTEMPT' / 'FIRST_ATTEMPT'; Schema B uses
-    'Repeat Attempt' / 'First Attempt'. Normalize to the same form."""
-    raw = _clean(r.get("attempt")) or _clean(r.get("attempt_number")) or ""
-    return raw.upper().replace(" ", "_").replace("-", "_")
-
-
-# ============================================================================
-# Subject playbooks — what to talk about + which questions to ask
-# ============================================================================
-_SUBJECT_PLAYBOOKS: dict[str, dict[str, Any]] = {
-    "ECONOMICS": {
-        "talking_points": (
-            "Economics splits into Micro, Macro, Indian Economy, Statistics, and "
-            "Mathematical Methods — most repeats stall on Math Econ or current-affairs-"
-            "heavy Indian Economy. Frame around topic-weighted PYQ analysis: NET "
-            "Economics has a high PYQ repeat rate, so weak-area drilling saves more "
-            "time than chapter-by-chapter revision. Tie to our test series (which "
-            "breaks down performance by unit) and the Indian Economy module which "
-            "ships weekly current-affairs updates so the lead doesn't have to track "
-            "NSSO/RBI separately."
-        ),
-        "questions": [
-            "Which area scares you most — Math Econ, or Indian Economy current affairs?",
-            "Have you done a topic-weighted PYQ analysis for the last 5 NET papers?",
-            "How are you handling Indian Economy current affairs every month?",
-        ],
-    },
-    "HISTORY": {
-        "talking_points": (
-            "NET History covers Ancient, Medieval, Modern Indian, World, and "
-            "Historiography — most repeats lose marks on Historiography (theoretical) "
-            "and source-based questions in Paper 2. Frame around theme-wise mastery "
-            "instead of chronology: themes like 'agrarian relations' or 'social "
-            "reform' cut across periods and produce more answers per hour studied. "
-            "Our History course has dedicated historiography and source-question modules."
-        ),
-        "questions": [
-            "Which area takes you longest — Modern Indian or Historiography?",
-            "Are you confident about source-based questions in Paper 2?",
-            "Are you organising prep by chronology, or by theme?",
-        ],
-    },
-    "SOCIOLOGY": {
-        "talking_points": (
-            "NET Sociology covers Sociological Theory (Marx, Weber, Durkheim), "
-            "Research Methods, Indian Society, Stratification, and Social Change. "
-            "Most repeats stall on theory application — knowing Weber isn't enough; "
-            "applying him to a contemporary Indian case is the actual exam. Our "
-            "Sociology course includes concept-application drills and weekly Indian "
-            "Society current-affairs updates."
-        ),
-        "questions": [
-            "Which theorist's framework do you find hardest to apply?",
-            "How are you tracking recent NSSO / Census data for Indian Society questions?",
-            "What's your weakest area — theory or application?",
-        ],
-    },
-    "POLITICAL SCIENCE": {
-        "talking_points": (
-            "NET Pol Sc covers Political Theory, Indian Govt & Politics, Comparative "
-            "Politics, IR, and Public Administration. The classic trap is treating "
-            "theory as memorisation — examiners want application to current cases. "
-            "Frame around case-study answer-writing. Our Pol Sc course has dedicated "
-            "essay frameworks and current-affairs-tagged answer banks."
-        ),
-        "questions": [
-            "Which area do you find hardest — Theory or Comparative Politics?",
-            "How regular is your answer-writing practice for Paper 2?",
-            "Are you confident on the IR section's recent-events component?",
-        ],
-    },
-    "COMMERCE": {
-        "talking_points": (
-            "NET Commerce spans Accounting, Business Finance, Marketing, HR, "
-            "International Business, and Statistics. The high-leverage areas are "
-            "the calculation-heavy units (Accounting + Finance) where most marks "
-            "are lost on careless errors, not concept gaps. Tie to our targeted "
-            "drills on PYQ-style numericals."
-        ),
-        "questions": [
-            "Where are you losing more marks — concepts or calculation errors?",
-            "Have you mapped PYQs by topic weightage for the last 5 papers?",
-            "How confident are you on the International Business + IFRS section?",
-        ],
-    },
+        {/* Footer hint when nothing has been searched yet */}
+        {!search.data && !search.isPending && !search.isError && (
+          <div className="card p-8 text-center">
+            <Search size={28} className="text-surface-300 mx-auto mb-2" />
+            <p className="text-sm text-surface-600 font-medium">Enter a phone number to start</p>
+            <p className="text-xs text-surface-500 mt-1">
+              Lookup shows every call we have on this number, with outcomes and recordings.
+            </p>
+          </div>
+        )}
+      </main>
+    </div>
+  );
 }
 
-_UPSC_PLAYBOOK = {
-    "talking_points": (
-        "UPSC prep splits into Prelims (GS + CSAT), Mains (4 GS papers + Optional + "
-        "Essay), and Personality Test. Most aspirants under-invest in answer-writing "
-        "and CSAT — the two highest-leverage areas after the syllabus is once covered. "
-        "Frame around our integrated programme: daily answer-writing with feedback, "
-        "weekly CSAT mocks, and current-affairs that's syllabus-mapped (not a news dump)."
-    ),
-    "questions": [
-        "Are you investing more time on Prelims or Mains right now?",
-        "How regular is your answer-writing practice — daily, weekly, or only test-day?",
-        "Have you picked your optional yet? How confident are you on it?",
-    ],
+// ---------- Results view ----------
+function ResultsView({ data }: { data: LookupResult }) {
+  // Bad input — couldn't normalize
+  if (!data.normalized_phone) {
+    return (
+      <div className="card p-4 border-amber-200 bg-amber-50 flex items-start gap-2">
+        <AlertCircle size={16} className="text-amber-700 mt-0.5 shrink-0" />
+        <div className="text-sm text-amber-900">
+          That doesn't look like a valid Indian mobile number. Try again with a 10-digit number.
+        </div>
+      </div>
+    );
+  }
+
+  // Valid number, but no calls in our system
+  if (!data.found || !data.summary) {
+    return (
+      <div className="card p-6 text-center">
+        <div className="text-sm text-surface-700">
+          No calls found for <span className="font-mono font-semibold">{data.normalized_phone}</span>
+        </div>
+        <p className="text-xs text-surface-500 mt-1.5">
+          This number hasn't been dialed yet, or hasn't synced into the system.
+        </p>
+      </div>
+    );
+  }
+
+  const { summary, calls, normalized_phone } = data;
+
+  return (
+    <>
+      {/* Summary card */}
+      <div className="card p-4 md:p-5 space-y-3">
+        <div className="flex items-start justify-between gap-3 flex-wrap">
+          <div className="min-w-0">
+            <h2 className="text-base md:text-lg font-semibold text-brand-navy truncate">
+              {summary.callee_name || 'Unknown name'}
+            </h2>
+            <div className="text-sm text-surface-600 font-mono">{normalized_phone}</div>
+          </div>
+          {summary.latest_interest && (
+            <span className={`pill border ${interestTone(summary.latest_interest)}`}>
+              {summary.latest_interest}
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 md:gap-3 pt-1">
+          <Stat icon={<Phone size={14} />} label="Total calls" value={summary.total_calls.toString()} />
+          <Stat icon={<Clock size={14} />} label="Total attempts" value={summary.total_attempts.toString()} />
+          <Stat icon={<CheckCircle2 size={14} />} label="Picked up" value={summary.connected_count.toString()} />
+          <Stat icon={<Clock size={14} />} label="Longest call" value={fmtDuration(summary.longest_duration_seconds)} />
+        </div>
+
+        {/* Narrative — multi-paragraph BD brief.
+            Backend uses '**Heading**' markers and '\n\n' paragraph separators.
+            Headings render as bold uppercase section titles; the rest as paragraphs.
+            'whitespace-pre-line' preserves '\n' inside paragraphs (used for the
+            bullet list of questions). */}
+        {summary.narrative && (
+          <div className="pt-2 border-t border-surface-100 mt-2 space-y-2">
+            {summary.narrative.split('\n\n').map((para, i) => {
+              if (para.startsWith('**') && para.endsWith('**')) {
+                return (
+                  <h3
+                    key={i}
+                    className="text-xs font-bold text-brand-navy uppercase tracking-wider mt-3 first:mt-0"
+                  >
+                    {para.slice(2, -2)}
+                  </h3>
+                );
+              }
+              return (
+                <p
+                  key={i}
+                  className="text-sm text-surface-800 leading-relaxed whitespace-pre-line"
+                >
+                  {para}
+                </p>
+              );
+            })}
+          </div>
+        )}
+
+        {(summary.latest_objection || summary.latest_follow_up) && (
+          <div className="pt-1 space-y-1.5 border-t border-surface-100 mt-2">
+            {summary.latest_objection && (
+              <div className="flex items-start gap-2 text-xs">
+                <MessageSquare size={12} className="text-surface-500 mt-0.5 shrink-0" />
+                <div>
+                  <span className="text-surface-500">Latest objection: </span>
+                  <span className="text-surface-800">{summary.latest_objection}</span>
+                </div>
+              </div>
+            )}
+            {summary.latest_follow_up && (
+              <div className="flex items-start gap-2 text-xs">
+                <Calendar size={12} className="text-surface-500 mt-0.5 shrink-0" />
+                <div>
+                  <span className="text-surface-500">Follow-up requested: </span>
+                  <span className="text-surface-800">{summary.latest_follow_up}</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="text-[11px] text-surface-500 pt-1 border-t border-surface-100">
+          {summary.first_call_at && summary.last_call_at && (
+            <>
+              First contact: {format(new Date(summary.first_call_at), 'd MMM yyyy')} ·{' '}
+              Last: {formatDistanceToNow(new Date(summary.last_call_at), { addSuffix: true })}
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Per-call history */}
+      <div className="space-y-2">
+        <div className="text-xs font-medium text-surface-500 uppercase tracking-wider px-1">
+          Call history ({calls.length})
+        </div>
+        {calls.map((c, idx) => (
+          <CallRow key={c.id} call={c} index={calls.length - idx} />
+        ))}
+      </div>
+    </>
+  );
 }
 
-_DEFAULT_PLAYBOOK = {
-    "talking_points": (
-        "Repeats usually have weak-area gaps from their last attempt rather than "
-        "total knowledge gaps. Frame around diagnostic-first prep: a topic-weighted "
-        "weak-area test reveals where most mark loss happens. Tie to whatever module "
-        "is closest to their subject in our catalog."
-    ),
-    "questions": [
-        "Which topic do you score lowest on in mock tests?",
-        "Have you looked at PYQ trends for the last 3-5 cycles?",
-        "What's your biggest time-leak — concept gaps, revision, or answer-writing?",
-    ],
-}
+// ---------- Per-call row ----------
+function CallRow({ call, index }: { call: LookupCall; index: number }) {
+  const [playing, setPlaying] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
-
-def _pick_playbook(subject: str | None, target: str | None) -> dict[str, Any]:
-    """Subject-keyed first; UPSC target fallback; generic default last."""
-    if subject:
-        key = subject.upper().strip()
-        if key in _SUBJECT_PLAYBOOKS:
-            return _SUBJECT_PLAYBOOKS[key]
-    if target:
-        tkey = target.upper().strip()
-        if "UPSC" in tkey or tkey == "CSE":
-            return _UPSC_PLAYBOOK
-    return _DEFAULT_PLAYBOOK
-
-
-# ============================================================================
-# Per-call summary
-# ============================================================================
-_INTEREST_PHRASES = {
-    "HIGH": "high interest", "MEDIUM": "moderate interest", "LOW": "low interest",
-    "Highly Interested": "high interest", "Interested": "interest",
-}
-
-_OBJECTION_INLINE = {
-    "TIME": "said timing wasn't right",
-    "NOT_INTERESTED": "not interested",
-    "ALREADY_PREPARING": "already self-studying",
-    "FEES": "raised fees concern",
-    "CAREER_CONFUSION": "unsure about career",
-    "AGE": "raised age concern",
-}
-
-
-def _summarize_call(call: CallLog) -> str | None:
-    if call.lifecycle_status != "COMPLETED" or call.answered_by != "HUMAN":
-        return None
-    r = call.result or {}
-    if not r:
-        return None
-
-    target = _clean(r.get("target")) or _clean(r.get("current_goal"))
-    subject = _normalize_subject(_clean(r.get("subject")))
-    attempt = _normalize_attempt(r)
-    intent = (_clean(r.get("preparation_intent")) or "").upper()
-
-    profile_parts: list[str] = []
-    if attempt == "REPEAT_ATTEMPT":
-        profile_parts.append("Repeat")
-    elif attempt == "FIRST_ATTEMPT":
-        profile_parts.append("First-time")
-    if target and subject:
-        profile_parts.append(f"{target} ({subject})")
-    elif target:
-        profile_parts.append(target)
-    if profile_parts:
-        profile_parts.append("aspirant")
-
-    intent_phrase = None
-    if intent == "EXPLORING":
-        intent_phrase = "still exploring"
-    elif intent == "SERIOUS":
-        intent_phrase = "preparing seriously"
-
-    profile_text = " ".join(profile_parts) if profile_parts else None
-    if profile_text and intent_phrase:
-        profile_text = f"{profile_text}, {intent_phrase}"
-    elif intent_phrase and not profile_text:
-        profile_text = intent_phrase
-
-    interest = _clean(r.get("interest_level")) or _clean(r.get("upsc_interest"))
-    objection_type = (r.get("objection_type") or "").upper()
-    objection_verbatim = _clean(r.get("objections_verbatim"))
-    next_step = (r.get("next_step_interest") or "").upper()
-    follow_up = _clean(r.get("follow_up_time")) or _clean(r.get("callback_time"))
-
-    sig: list[str] = []
-    if interest:
-        sig.append(f"showed {_INTEREST_PHRASES.get(interest, interest.lower() + ' interest')}")
-    if objection_type in _OBJECTION_INLINE:
-        sig.append(_OBJECTION_INLINE[objection_type])
-    elif objection_verbatim and objection_type not in ("NOT COVERED", "NOT AVAILABLE", ""):
-        quoted = objection_verbatim[:80] + ("…" if len(objection_verbatim) > 80 else "")
-        sig.append(f'said "{quoted}"')
-    if next_step == "CALLBACK":
-        sig.append(f"asked for callback at {follow_up}" if follow_up else "asked for a callback")
-    elif next_step == "DEMO":
-        sig.append("asked for a demo")
-    elif next_step == "ENROL":
-        sig.append("ready to enrol")
-
-    parts: list[str] = []
-    if profile_text:
-        parts.append(profile_text[0].upper() + profile_text[1:] + ".")
-    if sig:
-        parts.append("On call: " + ", ".join(sig) + ".")
-
-    if not parts and objection_verbatim:
-        return f'Said: "{objection_verbatim[:120]}"'
-
-    return " ".join(parts) if parts else None
-
-
-# ============================================================================
-# Narrative builders
-# ============================================================================
-def _profile_paragraph(r: dict) -> str | None:
-    target = _clean(r.get("target")) or _clean(r.get("current_goal"))
-    subject = _normalize_subject(_clean(r.get("subject")))
-    attempt = _normalize_attempt(r)
-    intent = (_clean(r.get("preparation_intent")) or "").upper()
-    profile = _clean(r.get("profile"))
-    target_year = _clean(r.get("target_year"))
-    biggest_challenge = _clean(r.get("biggest_challenge"))
-
-    if not target and not profile:
-        return None
-
-    head: list[str] = []
-    if attempt == "REPEAT_ATTEMPT":
-        head.append("Repeat")
-    elif attempt == "FIRST_ATTEMPT":
-        head.append("First-time")
-
-    if target and subject:
-        head.append(f"{target} ({subject})")
-    elif target:
-        head.append(target)
-
-    if head:
-        head.append("aspirant")
-    base = " ".join(head)
-
-    extras: list[str] = []
-    if profile:
-        extras.append(profile.lower())
-    if target_year:
-        extras.append(f"target {target_year}")
-    if intent == "EXPLORING":
-        extras.append("still in exploring mode")
-    elif intent == "SERIOUS":
-        extras.append("serious about preparation")
-
-    if base and extras:
-        sentence = f"{base}, " + ", ".join(extras) + "."
-    elif base:
-        sentence = base + "."
-    elif extras:
-        joined = ", ".join(extras)
-        sentence = joined[0].upper() + joined[1:] + "."
-    else:
-        return None
-
-    if biggest_challenge:
-        sentence += f" Main challenge is {biggest_challenge.lower()}."
-
-    return sentence
-
-
-def _status_paragraph(r: dict) -> str | None:
-    interest = _clean(r.get("interest_level")) or _clean(r.get("upsc_interest"))
-    objection_type = (r.get("objection_type") or "").upper()
-    objection_verbatim = _clean(r.get("objections_verbatim"))
-    next_step = (r.get("next_step_interest") or "").upper()
-    follow_up = _clean(r.get("follow_up_time")) or _clean(r.get("callback_time"))
-
-    bits: list[str] = []
-    if interest:
-        i = interest.lower()
-        if interest.upper() == "HIGH" or "highly" in i:
-            bits.append("Showed strong interest")
-        elif interest.upper() == "MEDIUM" or i == "interested":
-            bits.append("Showed moderate interest")
-        elif interest.upper() == "LOW":
-            bits.append("Low interest signal")
-
-    obj_map = {
-        "TIME": "said the time commitment is too high",
-        "FEES": "raised concerns about fees",
-        "ALREADY_PREPARING": "already self-studying",
-        "NOT_INTERESTED": "wasn't interested in our offering",
-        "CAREER_CONFUSION": "expressed confusion about career direction",
-        "AGE": "raised an age-related concern",
+  const togglePlay = () => {
+    if (!audioRef.current) return;
+    if (playing) {
+      audioRef.current.pause();
+    } else {
+      audioRef.current.play();
     }
-    if objection_type in obj_map:
-        bits.append(obj_map[objection_type])
-    elif objection_verbatim and objection_type not in ("NOT COVERED", "NOT AVAILABLE", ""):
-        quoted = objection_verbatim[:90] + ("…" if len(objection_verbatim) > 90 else "")
-        bits.append(f'said "{quoted}"')
+  };
 
-    if next_step == "CALLBACK":
-        bits.append(
-            f"asked for a callback at {follow_up}" if follow_up
-            else "asked for a callback without locking a slot"
-        )
-    elif next_step == "DEMO":
-        bits.append("wants a demo")
-    elif next_step == "ENROL":
-        bits.append("ready to enrol")
+  const when = call.when ? new Date(call.when) : null;
+  const tone = statusTone(call.status, call.answered_by);
 
-    if not bits:
-        return None
-    if len(bits) == 1:
-        return bits[0][0].upper() + bits[0][1:] + "."
-    if len(bits) == 2:
-        return f"{bits[0][0].upper() + bits[0][1:]}, {bits[1]}."
-    first = bits[0][0].upper() + bits[0][1:]
-    middle = ", ".join(bits[1:-1])
-    return f"{first}, {middle}, and {bits[-1]}."
+  return (
+    <div className="card p-3 md:p-4">
+      <div className="flex items-start gap-3">
+        <div className="text-xs font-mono tabular-nums text-surface-400 mt-0.5 shrink-0">#{index}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`pill border ${tone}`}>{statusLabel(call.status, call.answered_by)}</span>
+              {call.duration_seconds > 0 && (
+                <span className="text-xs text-surface-600 tabular-nums">
+                  {fmtDuration(call.duration_seconds)}
+                </span>
+              )}
+              {call.retry_count > 0 && (
+                <span className="text-xs text-surface-500">retry #{call.retry_count}</span>
+              )}
+              {call.language && (
+                <span className="text-xs text-surface-500">{call.language}</span>
+              )}
+            </div>
+            {when && (
+              <span className="text-xs text-surface-500" title={format(when, 'd MMM yyyy, HH:mm')}>
+                {formatDistanceToNow(when, { addSuffix: true })}
+              </span>
+            )}
+          </div>
 
+          {call.summary && (
+            <div className="mt-2 text-xs text-surface-700 leading-relaxed border-l-2 border-brand-pink/30 pl-2.5">
+              {call.summary}
+            </div>
+          )}
 
-def _strategic_angle(r: dict) -> str | None:
-    interest = (r.get("interest_level") or "").upper()
-    upsc_interest = (r.get("upsc_interest") or "").lower()
-    objection = (r.get("objection_type") or "").upper()
-    intent = (r.get("preparation_intent") or "").upper()
-    attempt = _normalize_attempt(r)
+          {(call.interest || call.objection_text || call.next_step || call.follow_up_at) && (
+            <div className="mt-2 space-y-1 text-xs">
+              {call.interest && (
+                <div>
+                  <span className="text-surface-500">Interest: </span>
+                  <span className={`font-medium ${interestTextTone(call.interest)}`}>{call.interest}</span>
+                </div>
+              )}
+              {call.objection_text && (
+                <div className="text-surface-700">
+                  <span className="text-surface-500">Said: </span>
+                  &ldquo;{call.objection_text}&rdquo;
+                </div>
+              )}
+              {call.next_step && call.next_step !== call.interest && (
+                <div className="text-surface-700">
+                  <span className="text-surface-500">Next step: </span>
+                  {call.next_step}
+                </div>
+              )}
+              {call.follow_up_at && (
+                <div className="text-surface-700">
+                  <span className="text-surface-500">Asked to be called at: </span>
+                  {call.follow_up_at}
+                </div>
+              )}
+            </div>
+          )}
 
-    if not interest:
-        if "highly" in upsc_interest:
-            interest = "HIGH"
-        elif "interested" in upsc_interest:
-            interest = "MEDIUM"
+          {/* Recording — proxied through backend so vendor URL never reaches the browser */}
+          {call.has_recording && (
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                onClick={togglePlay}
+                className="btn-outline px-3 py-1.5 text-xs"
+                title={playing ? 'Pause' : 'Play recording'}
+              >
+                {playing ? <PauseCircle size={14} /> : <PlayCircle size={14} />}
+                {playing ? 'Pause' : 'Play recording'}
+              </button>
+              <audio
+                ref={audioRef}
+                src={api.recordingUrl(call.id)}
+                preload="none"
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+                onEnded={() => setPlaying(false)}
+                className="hidden"
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
-    if objection == "TIME":
-        if attempt == "REPEAT_ATTEMPT":
-            return (
-                "This is a sceptical repeat aspirant — pushing hard will backfire. "
-                "Open with a realistic 2-hr/day plan and weak-area analytics that "
-                "show what's different this time."
-            )
-        return (
-            "The lead's worried about the time commitment. Lead with a structured "
-            "plan and PYQ-driven shortcuts — frame everything around output per hour, "
-            "not features."
-        )
-    if objection == "FEES":
-        return (
-            "Price-sensitive. Don't open with the sticker. Lead with EMI options and "
-            "scholarship eligibility, and frame ROI against offline coaching cost."
-        )
-    if objection == "ALREADY_PREPARING":
-        return (
-            "The lead's already self-studying — don't position our course as a "
-            "replacement. Pitch test series, mentorship, or doubt-clearing as "
-            "supplements that fix gaps in their current prep."
-        )
-    if objection == "CAREER_CONFUSION":
-        return (
-            "Not in a buying mindset yet. Connect with a counsellor first — "
-            "selling now will backfire."
-        )
-    if objection == "NOT_INTERESTED":
-        return "Low signal lead. Move to WhatsApp nurture and don't dial again this week."
-    if objection == "AGE":
-        return (
-            "Surface success stories of older qualifiers — the syllabus is age-agnostic "
-            "and selection rates by age band are reassuring."
-        )
-    if intent == "EXPLORING":
-        return (
-            "Not committed yet. Send free content (sample lectures, webinar) before "
-            "any direct pitch."
-        )
-    if intent == "SERIOUS" and interest == "HIGH":
-        return (
-            "Buyer-mode. Direct pitch is fine — lead with the most specific differentiator "
-            "(live doubt-clearing, mentor calls)."
-        )
-    return None
+// ---------- Helpers ----------
+function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-surface-50 px-3 py-2">
+      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-surface-500">
+        {icon}
+        {label}
+      </div>
+      <div className="text-base font-semibold tabular-nums text-brand-navy mt-0.5">{value}</div>
+    </div>
+  );
+}
 
+function fmtDuration(sec: number): string {
+  if (sec < 60) return `${Math.round(sec)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
+}
 
-def _approach_paragraphs(r: dict) -> list[str]:
-    """Returns a list of paragraphs for the Approach section."""
-    objection = (r.get("objection_type") or "").upper()
-    subject = _clean(r.get("subject"))
-    target = _clean(r.get("target")) or _clean(r.get("current_goal"))
+function statusLabel(status: string, answeredBy: string): string {
+  if (status === 'COMPLETED' && answeredBy === 'HUMAN') return 'Picked up';
+  if (status === 'COMPLETED' && answeredBy === 'MACHINE') return 'Voicemail';
+  if (status === 'COMPLETED') return 'Completed';
+  if (status === 'NOT_CONNECTED') return 'No answer';
+  if (status === 'FAILED') return 'Failed';
+  if (status === 'IN_PROGRESS') return 'In progress';
+  if (status === 'SCHEDULED') return 'Scheduled';
+  return status.replace('_', ' ').toLowerCase();
+}
 
-    paragraphs: list[str] = []
+function statusTone(status: string, answeredBy: string): string {
+  if (status === 'COMPLETED' && answeredBy === 'HUMAN') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  if (status === 'COMPLETED' && answeredBy === 'MACHINE') return 'bg-surface-100 text-surface-700 border-surface-200';
+  if (status === 'NOT_CONNECTED') return 'bg-surface-100 text-surface-600 border-surface-200';
+  if (status === 'FAILED') return 'bg-red-50 text-red-700 border-red-200';
+  if (status === 'IN_PROGRESS') return 'bg-blue-50 text-blue-700 border-blue-200';
+  return 'bg-surface-100 text-surface-700 border-surface-200';
+}
 
-    angle = _strategic_angle(r)
-    if angle:
-        paragraphs.append(angle)
+function interestTone(interest: string): string {
+  const i = interest.toLowerCase();
+  if (i === 'high') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+  if (i === 'medium') return 'bg-emerald-50/60 text-emerald-600 border-emerald-100';
+  if (i.includes('callback')) return 'bg-brand-pink/10 text-brand-pink border-brand-pink/30';
+  if (i.includes('objection') || i.includes('not interested') || i.includes('fees')) {
+    return 'bg-amber-50 text-amber-700 border-amber-200';
+  }
+  return 'bg-surface-100 text-surface-700 border-surface-200';
+}
 
-    # Skip subject content + questions for "not interested" — no point
-    if objection != "NOT_INTERESTED":
-        playbook = _pick_playbook(subject, target)
-        tp = playbook.get("talking_points")
-        if tp:
-            paragraphs.append("Talking points: " + tp)
-        questions = playbook.get("questions") or []
-        if questions:
-            q_block = "Questions to open with:\n" + "\n".join(f"• {q}" for q in questions)
-            paragraphs.append(q_block)
-
-    return paragraphs
-
-
-def _build_narrative(calls: list[CallLog]) -> str | None:
-    """Build the BD-actionable narrative.
-
-    Output is a single string with '**Heading**' markers and '\\n\\n'
-    paragraph separators. Frontend splits and renders headings as section titles.
-    """
-    if not calls:
-        return None
-
-    total = len(calls)
-    connected = sum(
-        1 for c in calls
-        if c.lifecycle_status == "COMPLETED" and c.answered_by == "HUMAN"
-    )
-    latest_connected = next(
-        (c for c in calls if c.lifecycle_status == "COMPLETED" and c.answered_by == "HUMAN"),
-        None,
-    )
-
-    paragraphs: list[str] = []
-
-    # Volume note (only when there's no connected call to derive richer signal from)
-    if connected == 0 and total >= 3:
-        paragraphs.append("**What we know**")
-        paragraphs.append(f"Dialled {total} times — never picked up.")
-        paragraphs.append("**Approach**")
-        paragraphs.append(
-            "Lead is screening or unreachable. Switch channels: send a WhatsApp "
-            "template with a short voice note in their language, then try one more "
-            "dial 5 days later. If still no response, write off."
-        )
-        return "\n\n".join(paragraphs)
-    if connected == 0:
-        paragraphs.append("Hasn't picked up any call yet. Try again at a different hour.")
-        return "\n\n".join(paragraphs)
-
-    if latest_connected and latest_connected.result:
-        r = latest_connected.result
-
-        # ---- What we know ----
-        whats_known: list[str] = []
-        p = _profile_paragraph(r)
-        if p:
-            whats_known.append(p)
-        s = _status_paragraph(r)
-        if s:
-            whats_known.append(s)
-
-        if whats_known:
-            paragraphs.append("**What we know**")
-            paragraphs.extend(whats_known)
-
-        # ---- Approach ----
-        approach_paras = _approach_paragraphs(r)
-        if approach_paras:
-            paragraphs.append("**Approach**")
-            paragraphs.extend(approach_paras)
-
-    return "\n\n".join(paragraphs) if paragraphs else None
-
-
-# ============================================================================
-# Build response objects
-# ============================================================================
-def _interest_label(call: CallLog) -> str | None:
-    r = call.result or {}
-    interest = (r.get("interest_level") or "").upper()
-    if interest in ("HIGH", "MEDIUM", "LOW"):
-        return interest.title()
-    upsc_interest = r.get("upsc_interest") or ""
-    if upsc_interest:
-        return upsc_interest
-    objection = (r.get("objection_type") or "").upper()
-    objection_map = {
-        "NOT_INTERESTED": "Not interested",
-        "TIME": "Time / busy",
-        "FEES": "Fees concern",
-        "CAREER_CONFUSION": "Career confusion",
-        "ALREADY_PREPARING": "Already preparing",
-    }
-    if objection in objection_map:
-        return objection_map[objection]
-    next_step = (r.get("next_step_interest") or "").upper()
-    if next_step == "CALLBACK":
-        return "Callback booked"
-    return None
-
-
-def _serialize_call(call: CallLog) -> LookupCall:
-    r = call.result or {}
-    return LookupCall(
-        id=call.id,
-        when=call.started_at or call.vendor_created_at,
-        status=call.lifecycle_status or "UNKNOWN",
-        answered_by=call.answered_by or "UNKNOWN",
-        duration_seconds=float(call.duration_seconds or 0),
-        retry_count=int(call.retry_count or 0),
-        has_recording=bool(call.recording_url),
-        interest=_interest_label(call),
-        objection_text=(r.get("objections_verbatim") or None) if isinstance(r.get("objections_verbatim"), str) else None,
-        next_step=r.get("next_step_interest") or None,
-        follow_up_at=r.get("follow_up_time") or r.get("callback_time") or None,
-        language=call.language or None,
-        summary=_summarize_call(call),
-    )
-
-
-# ============================================================================
-# Routes
-# ============================================================================
-@router.get("", response_model=LookupResult)
-async def lookup(
-    request: Request,
-    phone: str = Query(..., description="Phone number — any format. Will be normalized to +91XXXXXXXXXX."),
-    db: AsyncSession = Depends(get_db),
-):
-    _rate_check(request.client.host if request.client else "unknown")
-
-    normalized = normalize_phone(phone)
-    if not normalized:
-        return LookupResult(
-            normalized_phone=None, input_phone=phone, found=False, summary=None, calls=[],
-        )
-
-    stmt = (
-        select(CallLog)
-        .where(CallLog.mobile_number == normalized)
-        .order_by(CallLog.started_at.desc().nullslast(), CallLog.vendor_created_at.desc())
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-
-    if not rows:
-        return LookupResult(
-            normalized_phone=normalized, input_phone=phone, found=False, summary=None, calls=[],
-        )
-
-    calls = [_serialize_call(c) for c in rows]
-
-    total_attempts = sum((c.retry_count + 1) for c in calls)
-    connected = sum(1 for c in calls if c.status == "COMPLETED" and c.answered_by == "HUMAN")
-    longest_dur = max((c.duration_seconds for c in calls), default=0.0)
-
-    latest_interest = next((c.interest for c in calls if c.interest), None)
-    latest_objection = next((c.objection_text for c in calls if c.objection_text), None)
-    latest_followup = next((c.follow_up_at for c in calls if c.follow_up_at), None)
-
-    callee_name_row = next((c for c in rows if c.callee_name), None)
-    callee_name_str = callee_name_row.callee_name if callee_name_row else None
-
-    summary = LookupSummary(
-        callee_name=callee_name_str,
-        total_calls=len(calls),
-        total_attempts=total_attempts,
-        connected_count=connected,
-        longest_duration_seconds=float(longest_dur),
-        latest_interest=latest_interest,
-        latest_objection=latest_objection,
-        latest_follow_up=latest_followup,
-        first_call_at=rows[-1].started_at or rows[-1].vendor_created_at,
-        last_call_at=rows[0].started_at or rows[0].vendor_created_at,
-        narrative=_build_narrative(rows),
-    )
-
-    return LookupResult(
-        normalized_phone=normalized, input_phone=phone, found=True, summary=summary, calls=calls,
-    )
-
-
-@router.get("/recording/{call_id}")
-async def get_recording(
-    call_id: UUID,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    _rate_check(request.client.host if request.client else "unknown")
-
-    call = (await db.execute(select(CallLog).where(CallLog.id == call_id))).scalar_one_or_none()
-    if not call or not call.recording_url:
-        raise HTTPException(status_code=404, detail="Recording not found")
-
-    upstream_url = call.recording_url
-
-    async def iter_stream():
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            async with client.stream("GET", upstream_url) as resp:
-                if resp.status_code >= 400:
-                    raise HTTPException(status_code=502, detail="Recording unavailable")
-                async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
-                    yield chunk
-
-    return StreamingResponse(
-        iter_stream(),
-        media_type="audio/wav",
-        headers={
-            "Cache-Control": "private, max-age=3600",
-            "Content-Disposition": f'inline; filename="call-{call_id}.wav"',
-        },
-    )
+function interestTextTone(interest: string): string {
+  const i = interest.toLowerCase();
+  if (i === 'high') return 'text-emerald-700';
+  if (i === 'medium') return 'text-emerald-600';
+  if (i.includes('not interested')) return 'text-red-700';
+  if (i.includes('callback')) return 'text-brand-pink';
+  return 'text-surface-700';
+}
