@@ -22,8 +22,10 @@ name: Sync vendors + keep Render awake
 # aggressive — they'd cancel each other before completing. 30 min is a
 # safer cadence given the API's actual response times.
 on:
-  schedule:
-    - cron: '*/30 * * * *'
+  # Schedule disabled 2026-05-12: replaced by Cloudflare Workers cron
+  # (ai-dashboard-cron). This workflow is kept for manual triggers only.
+  # schedule:
+  #   - cron: '*/30 * * * *'
   workflow_dispatch:
 
 # Concurrency: do NOT cancel in-progress runs anymore. Previously a slow
