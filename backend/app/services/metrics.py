@@ -304,19 +304,29 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
             select(
                 _Cmp.id,
                 _Cmp.name,
+                _Cmp.display_name.label("display_name_db"),
+                _Cmp.vendor_request_id,
+                _Cmp.vendor_campaign_id,
                 func.coalesce(_Cmp.started_at, _Cmp.created_at).label("started_at"),
                 func.count().label("shared"),
             )
             .join(CallLog, CallLog.campaign_id == _Cmp.id)
             .where(CallLog.mobile_number.in_(select(dup_phones_sq.c.mobile_number)))
-            .group_by(_Cmp.id, _Cmp.name, _Cmp.started_at, _Cmp.created_at)
+            .group_by(_Cmp.id, _Cmp.name, _Cmp.display_name, _Cmp.vendor_request_id,
+                      _Cmp.vendor_campaign_id, _Cmp.started_at, _Cmp.created_at)
             .order_by(func.count().desc())
         )
         camp_stmt = filters.apply(camp_stmt)
         for r in (await db.execute(camp_stmt)).all():
+            if r.display_name_db:
+                display = r.display_name_db
+            elif r.vendor_campaign_id:
+                display = f"Campaign {r.vendor_campaign_id[:8]}"
+            else:
+                display = f"Campaign {r.vendor_request_id[:8]}"
             duplicate_campaigns.append({
                 "campaign_id":   str(r.id),
-                "campaign_name": r.name,
+                "campaign_name": display,
                 "started_at":    r.started_at.isoformat() if r.started_at else None,
                 "shared_leads":  int(r.shared or 0),
             })
@@ -535,27 +545,43 @@ async def campaign_breakdown(db: AsyncSession, filters: MetricFilters) -> list[d
         select(
             Campaign.id.label("campaign_id"),
             Campaign.name.label("campaign_name"),
+            Campaign.display_name.label("display_name_db"),
+            Campaign.vendor_request_id,
+            Campaign.vendor_campaign_id,
             Campaign.vendor_id,
             Vendor.name.label("vendor_name"),
             Campaign.started_at,
-            func.count(CallLog.id).label("row_count"),       # rate denominator
-            _total_dials_expr.label("total"),                # display value
+            func.count(CallLog.id).label("row_count"),       # unique leads in slice = rate denominator
+            _total_dials_expr.label("total"),                # total dial attempts
             func.sum(case((_is_connected, 1), else_=0)).label("connected"),
+            func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
         )
         .join(CallLog, CallLog.campaign_id == Campaign.id)
         .join(Vendor, Vendor.id == Campaign.vendor_id)
-        .group_by(Campaign.id, Campaign.name, Campaign.vendor_id, Vendor.name, Campaign.started_at)
+        .group_by(Campaign.id, Campaign.name, Campaign.display_name, Campaign.vendor_request_id,
+                  Campaign.vendor_campaign_id, Campaign.vendor_id, Vendor.name, Campaign.started_at)
         .order_by(Campaign.started_at.desc())
     )
     stmt = filters.apply(stmt)
     rows = (await db.execute(stmt)).all()
     out = []
     for r in rows:
-        date_str = r.started_at.strftime("%Y-%m-%d") if r.started_at else None
-        parts = [p for p in (date_str, r.vendor_name, r.campaign_name) if p]
-        display = " — ".join(parts)
+        # Display label precedence:
+        #   1. Campaign.display_name (user-set / synced from vendor UI)
+        #   2. "Campaign <short hunar_campaign_id>" if we have one
+        #   3. "Campaign <short request_id>" fallback
+        if r.display_name_db:
+            display = r.display_name_db
+        elif r.vendor_campaign_id:
+            display = f"Campaign {r.vendor_campaign_id[:8]}"
+        else:
+            display = f"Campaign {r.vendor_request_id[:8]}"
+
         row_count = int(r.row_count or 0)
+        connected = int(r.connected or 0)
+        engaged = int(r.engaged or 0)
+        interested = int(r.interested or 0)
         out.append({
             "campaign_id": str(r.campaign_id),
             "campaign_name": r.campaign_name,
@@ -563,11 +589,14 @@ async def campaign_breakdown(db: AsyncSession, filters: MetricFilters) -> list[d
             "vendor_id": str(r.vendor_id),
             "vendor_name": r.vendor_name,
             "started_at": r.started_at.isoformat() if r.started_at else None,
-            "total_calls": int(r.total or 0),               # dial attempts
-            "connected_calls": int(r.connected or 0),
-            "interested_calls": int(r.interested or 0),
-            "connection_rate": _safe_div(int(r.connected or 0), row_count),
-            "interest_rate": _safe_div(int(r.interested or 0), int(r.connected or 0)),
+            "unique_leads": row_count,                       # denominator for connection_rate
+            "total_calls": int(r.total or 0),                # total dial attempts
+            "connected_calls": connected,
+            "engaged_calls": engaged,
+            "interested_calls": interested,
+            "connection_rate": _safe_div(connected, row_count),
+            "engagement_rate": _safe_div(engaged, connected),
+            "interest_rate": _safe_div(interested, connected),
         })
     return out
 
@@ -830,6 +859,9 @@ async def _hour_by_campaign(db: AsyncSession, filters: MetricFilters, top_n: int
         select(
             Campaign.id.label("campaign_id"),
             Campaign.name.label("campaign_name"),
+            Campaign.display_name.label("display_name_db"),
+            Campaign.vendor_request_id,
+            Campaign.vendor_campaign_id,
             Vendor.name.label("vendor_name"),
             Campaign.started_at,
             h.label("hour"),
@@ -844,7 +876,8 @@ async def _hour_by_campaign(db: AsyncSession, filters: MetricFilters, top_n: int
         .join(CallLog, CallLog.campaign_id == Campaign.id)
         .join(Vendor, Vendor.id == Campaign.vendor_id)
         .where(Campaign.id.in_(top_ids))
-        .group_by(Campaign.id, Campaign.name, Vendor.name, Campaign.started_at, h)
+        .group_by(Campaign.id, Campaign.name, Campaign.display_name, Campaign.vendor_request_id,
+                  Campaign.vendor_campaign_id, Vendor.name, Campaign.started_at, h)
         .order_by(Campaign.started_at.desc().nulls_last(), h)
     )
     stmt = filters.apply(stmt)
@@ -854,9 +887,13 @@ async def _hour_by_campaign(db: AsyncSession, filters: MetricFilters, top_n: int
     for r in rows:
         cid = str(r.campaign_id)
         if cid not in by_c:
-            date_str = r.started_at.strftime("%Y-%m-%d") if r.started_at else None
-            parts = [p for p in (date_str, r.vendor_name, r.campaign_name) if p]
-            display = " — ".join(parts)
+            # Prefer Campaign.display_name → "Campaign <hunar_campaign_id>" → "Campaign <request_id>"
+            if r.display_name_db:
+                display = r.display_name_db
+            elif r.vendor_campaign_id:
+                display = f"Campaign {r.vendor_campaign_id[:8]}"
+            else:
+                display = f"Campaign {r.vendor_request_id[:8]}"
             by_c[cid] = {
                 "campaign_id": cid,
                 "campaign_name": r.campaign_name,
