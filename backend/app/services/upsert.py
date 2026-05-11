@@ -89,6 +89,7 @@ async def ensure_campaign(
     agent_id: UUID | None = None,
     started_at: datetime | None = None,
     name: str | None = None,
+    vendor_campaign_id: str | None = None,
 ) -> UUID:
     # Defense in depth: even if some other code path reaches this fn directly
     # (e.g. a future campaign-list sync), refuse to create excluded campaigns.
@@ -99,20 +100,29 @@ async def ensure_campaign(
         raise ValueError(f"campaign vendor_request_id={vendor_request_id} is excluded")
 
     res = await db.execute(
-        select(Campaign.id).where(
+        select(Campaign.id, Campaign.vendor_campaign_id).where(
             Campaign.vendor_id == vendor_id,
             Campaign.vendor_request_id == vendor_request_id,
         )
     )
-    existing = res.scalar_one_or_none()
+    existing = res.first()
     if existing:
-        return existing
+        # Back-fill vendor_campaign_id if we now have it and the row is missing it.
+        # Cheap, idempotent — only updates when we have new info.
+        if vendor_campaign_id and not existing.vendor_campaign_id:
+            await db.execute(
+                Campaign.__table__.update()
+                .where(Campaign.id == existing.id)
+                .values(vendor_campaign_id=vendor_campaign_id)
+            )
+        return existing.id
 
     # Auto-name based on request_id if nothing else.
     auto_name = name or f"Campaign {vendor_request_id[:24]}"
     stmt = pg_insert(Campaign).values(
         vendor_id=vendor_id,
         vendor_request_id=vendor_request_id,
+        vendor_campaign_id=vendor_campaign_id,
         name=auto_name,
         agent_id=agent_id,
         source="vendor_ui",
@@ -168,6 +178,7 @@ async def upsert_call(db: AsyncSession, vendor_id: UUID, n: NormalizedCall) -> U
             n.vendor_request_id,
             agent_id=agent_id,
             started_at=n.vendor_created_at,
+            vendor_campaign_id=n.vendor_campaign_id,
         )
 
     payload: dict[str, Any] = {
