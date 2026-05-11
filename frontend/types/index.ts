@@ -93,10 +93,12 @@ export type HourBucket = {
   connected_calls: number;
   engaged_calls: number;
   interested_calls: number;
+  callback_calls?: number;
   avg_duration_seconds: number;
   connection_rate: number;
   engagement_rate: number;
   interest_rate: number;
+  callback_rate?: number;
 };
 
 export type DowBucket = {
@@ -106,10 +108,12 @@ export type DowBucket = {
   connected_calls: number;
   engaged_calls: number;
   interested_calls: number;
+  callback_calls?: number;
   avg_duration_seconds: number;
   connection_rate: number;
   engagement_rate: number;
   interest_rate: number;
+  callback_rate?: number;
 };
 
 export type HeatmapCell = {
@@ -120,10 +124,12 @@ export type HeatmapCell = {
   connected_calls: number;
   engaged_calls: number;
   interested_calls: number;
+  callback_calls?: number;
   avg_duration_seconds: number;
   connection_rate: number;
   engagement_rate: number;
   interest_rate: number;
+  callback_rate?: number;
 };
 
 export type VendorHourSplit = {
