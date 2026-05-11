@@ -4,7 +4,7 @@ import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  LayoutDashboard, Users, Phone, Bot, Send, Clock, Menu, X, ScrollText, CalendarDays,
+  LayoutDashboard, Users, Phone, Bot, Send, Clock, Menu, X, ScrollText, CalendarDays, Search,
 } from 'lucide-react';
 import { cn } from '@/lib/api';
 
@@ -18,19 +18,18 @@ const NAV = [
   { href: '/vendors',         label: 'Vendor Analysis',   icon: Users },
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/calls',           label: 'Call Logs',         icon: Phone },
+  { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
   { href: '/ledger',          label: 'Activity Log',      icon: ScrollText },
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
 ];
 
 // Mobile-only nav: a fixed top bar with hamburger + logo, plus a slide-in
 // drawer when the hamburger is tapped. Hidden on lg+ where the desktop
-// Sidebar takes over.
+// Sidebar takes over. On the BDA lookup hostname, the root layout skips
+// rendering this component entirely via the x-is-lookup-host header check.
 export default function MobileNav() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-
-  // BDA lookup tool runs as a separate mini-app — hide the main-app nav
-  if (pathname?.startsWith('/lookup')) return null;
 
   // Close drawer when route changes (the user just tapped a nav item)
   useEffect(() => { setOpen(false); }, [pathname]);
