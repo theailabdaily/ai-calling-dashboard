@@ -26,6 +26,20 @@ EXCLUDED_VENDOR_REQUEST_IDS: set[str] = {
 }
 
 
+# Hard inclusion list of vendor_agent_ids we actually care about. Anything from
+# an agent NOT in this set is silently dropped at ingest time — both at the
+# agent sync (upsert_agent) and at the call sync (upsert_call). This prevents
+# Hunar's POC test calls (using their own test agents like UPSC-TOFU, UPS-DNP)
+# from polluting our dashboard with phantom 1-lead "campaigns".
+#
+# Fail-closed by design: a new agent created on Hunar's side will NOT auto-
+# appear here. When we add a real second agent for our team (e.g. Banking,
+# CTET), we extend this set explicitly.
+ALLOWED_VENDOR_AGENT_IDS: set[str] = {
+    "7448ffa2-0073-47b0-8c63-8073939b2bda",  # UGC NET Agent (Hindi) — the only one we run
+}
+
+
 async def get_vendor_by_slug(db: AsyncSession, slug: str) -> Vendor | None:
     res = await db.execute(select(Vendor).where(Vendor.slug == slug))
     return res.scalar_one_or_none()
@@ -34,7 +48,13 @@ async def get_vendor_by_slug(db: AsyncSession, slug: str) -> Vendor | None:
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
-async def upsert_agent(db: AsyncSession, vendor_id: UUID, n: NormalizedAgent) -> UUID:
+async def upsert_agent(db: AsyncSession, vendor_id: UUID, n: NormalizedAgent) -> UUID | None:
+    if n.vendor_agent_id not in ALLOWED_VENDOR_AGENT_IDS:
+        logger.debug(
+            "skipping non-allowed agent vendor_agent_id=%s name=%s",
+            n.vendor_agent_id, n.name,
+        )
+        return None
     stmt = pg_insert(Agent).values(
         vendor_id=vendor_id,
         vendor_agent_id=n.vendor_agent_id,
@@ -129,6 +149,13 @@ async def _agent_id_for(db: AsyncSession, vendor_id: UUID, vendor_agent_id: str 
 async def upsert_call(db: AsyncSession, vendor_id: UUID, n: NormalizedCall) -> UUID | None:
     if n.vendor_request_id and n.vendor_request_id in EXCLUDED_VENDOR_REQUEST_IDS:
         logger.debug("skipping excluded request_id=%s call_id=%s", n.vendor_request_id, n.vendor_call_id)
+        return None
+
+    if n.vendor_agent_id and n.vendor_agent_id not in ALLOWED_VENDOR_AGENT_IDS:
+        logger.debug(
+            "skipping call from non-allowed agent vendor_agent_id=%s call_id=%s",
+            n.vendor_agent_id, n.vendor_call_id,
+        )
         return None
 
     agent_id = await _agent_id_for(db, vendor_id, n.vendor_agent_id)
