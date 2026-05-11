@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # Webhooks — public URL where Hunar can reach us
     public_webhook_base_url: str | None = None
     webhook_shared_secret: str | None = None        # we'll add HMAC verification when Hunar supports it
+    cron_shared_secret: str | None = None        # external cron trigger auth (Cloudflare Worker)
 
     # Sync cadence
     sync_calls_interval_minutes: int = 15
