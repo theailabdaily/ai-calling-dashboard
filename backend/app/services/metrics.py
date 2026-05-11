@@ -649,15 +649,18 @@ def _bucket_row_to_dict(r, key: str) -> dict[str, Any]:
     connected = int(r.connected or 0)
     engaged = int(r.engaged or 0)
     interested = int(r.interested or 0)
+    callback = int(getattr(r, "callback", None) or 0)
     out = {
         "total_calls": total,
         "connected_calls": connected,
         "engaged_calls": engaged,
         "interested_calls": interested,
+        "callback_calls": callback,
         "avg_duration_seconds": float(r.avg_dur or 0),
         "connection_rate": _safe_div(connected, row_count),
         "engagement_rate": _safe_div(engaged, connected),
         "interest_rate": _safe_div(interested, connected),
+        "callback_rate": _safe_div(callback, connected),
     }
     if key == "hour":
         out["hour"] = int(r.hour)
@@ -679,6 +682,7 @@ async def _hour_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict
             func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
             func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+            func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("callback"),
         )
         .group_by(h)
         .order_by(h)
@@ -699,6 +703,7 @@ async def _dow_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict[
             func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
             func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+            func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("callback"),
         )
         .group_by(d)
         .order_by(d)
@@ -721,6 +726,7 @@ async def _dow_hour_heatmap(db: AsyncSession, filters: MetricFilters) -> list[di
             func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
             func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+            func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("callback"),
         )
         .group_by(d, h)
         .order_by(d, h)
@@ -734,6 +740,7 @@ async def _dow_hour_heatmap(db: AsyncSession, filters: MetricFilters) -> list[di
         connected = int(r.connected or 0)
         engaged = int(r.engaged or 0)
         interested = int(r.interested or 0)
+        callback = int(r.callback or 0)
         dow = int(r.dow)
         out.append({
             "dow": dow,
@@ -743,10 +750,12 @@ async def _dow_hour_heatmap(db: AsyncSession, filters: MetricFilters) -> list[di
             "connected_calls": connected,
             "engaged_calls": engaged,
             "interested_calls": interested,
+            "callback_calls": callback,
             "avg_duration_seconds": float(r.avg_dur or 0),
             "connection_rate": _safe_div(connected, row_count),
             "engagement_rate": _safe_div(engaged, connected),
             "interest_rate": _safe_div(interested, connected),
+            "callback_rate": _safe_div(callback, connected),
         })
     return out
 
@@ -764,6 +773,7 @@ async def _hour_by_vendor(db: AsyncSession, filters: MetricFilters) -> list[dict
             func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
             func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+            func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("callback"),
         )
         .join(CallLog, CallLog.vendor_id == Vendor.id)
         .group_by(Vendor.id, Vendor.name, h)
@@ -783,16 +793,19 @@ async def _hour_by_vendor(db: AsyncSession, filters: MetricFilters) -> list[dict
         connected = int(r.connected or 0)
         engaged = int(r.engaged or 0)
         interested = int(r.interested or 0)
+        callback = int(r.callback or 0)
         by_v[vid]["hours"].append({
             "hour": int(r.hour),
             "total_calls": total,
             "connected_calls": connected,
             "engaged_calls": engaged,
             "interested_calls": interested,
+            "callback_calls": callback,
             "avg_duration_seconds": float(r.avg_dur or 0),
             "connection_rate": _safe_div(connected, row_count),
             "engagement_rate": _safe_div(engaged, connected),
             "interest_rate": _safe_div(interested, connected),
+            "callback_rate": _safe_div(callback, connected),
         })
     return list(by_v.values())
 
@@ -826,6 +839,7 @@ async def _hour_by_campaign(db: AsyncSession, filters: MetricFilters, top_n: int
             func.avg(case((_is_connected, CallLog.duration_seconds))).label("avg_dur"),
             func.sum(case((and_(_is_connected, _is_engaged), 1), else_=0)).label("engaged"),
             func.sum(case((and_(_is_connected, _is_interested), 1), else_=0)).label("interested"),
+            func.sum(case((and_(_is_connected, _has_follow_up), 1), else_=0)).label("callback"),
         )
         .join(CallLog, CallLog.campaign_id == Campaign.id)
         .join(Vendor, Vendor.id == Campaign.vendor_id)
@@ -854,16 +868,19 @@ async def _hour_by_campaign(db: AsyncSession, filters: MetricFilters, top_n: int
         connected = int(r.connected or 0)
         engaged = int(r.engaged or 0)
         interested = int(r.interested or 0)
+        callback = int(r.callback or 0)
         by_c[cid]["hours"].append({
             "hour": int(r.hour),
             "total_calls": total,
             "connected_calls": connected,
             "engaged_calls": engaged,
             "interested_calls": interested,
+            "callback_calls": callback,
             "avg_duration_seconds": float(r.avg_dur or 0),
             "connection_rate": _safe_div(connected, row_count),
             "engagement_rate": _safe_div(engaged, connected),
             "interest_rate": _safe_div(interested, connected),
+            "callback_rate": _safe_div(callback, connected),
         })
     return list(by_c.values())
 
