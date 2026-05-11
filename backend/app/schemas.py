@@ -138,10 +138,12 @@ class HourBucket(BaseModel):
     connected_calls: int
     engaged_calls: int
     interested_calls: int
+    callback_calls: int = 0
     avg_duration_seconds: float
     connection_rate: float
     engagement_rate: float
     interest_rate: float
+    callback_rate: float = 0.0
 
 
 class DowBucket(BaseModel):
@@ -151,10 +153,12 @@ class DowBucket(BaseModel):
     connected_calls: int
     engaged_calls: int
     interested_calls: int
+    callback_calls: int = 0
     avg_duration_seconds: float
     connection_rate: float
     engagement_rate: float
     interest_rate: float
+    callback_rate: float = 0.0
 
 
 class HeatmapCell(BaseModel):
@@ -165,10 +169,12 @@ class HeatmapCell(BaseModel):
     connected_calls: int
     engaged_calls: int
     interested_calls: int
+    callback_calls: int = 0
     avg_duration_seconds: float
     connection_rate: float
     engagement_rate: float
     interest_rate: float
+    callback_rate: float = 0.0
 
 
 class VendorHourSplit(BaseModel):
