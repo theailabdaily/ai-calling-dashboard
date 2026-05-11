@@ -197,10 +197,13 @@ export type CampaignRow = {
   vendor_id: string;
   vendor_name?: string | null;
   started_at: string | null;
-  total_calls: number;
+  unique_leads?: number;        // distinct phones in this campaign = denominator for connection_rate
+  total_calls: number;          // total dial attempts (includes retries)
   connected_calls: number;
+  engaged_calls?: number;
   interested_calls: number;
   connection_rate: number;
+  engagement_rate?: number;
   interest_rate: number;
 };
 
