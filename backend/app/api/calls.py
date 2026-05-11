@@ -41,7 +41,7 @@ async def list_calls(
         select(
             CallLog,
             Vendor.name.label("vendor_name"),
-            Campaign.name.label("campaign_name"),
+            func.coalesce(Campaign.display_name, Campaign.name).label("campaign_name"),
             Agent.name.label("agent_name"),
         )
         .join(Vendor, Vendor.id == CallLog.vendor_id)
@@ -171,7 +171,7 @@ async def get_call(call_id: UUID, db: AsyncSession = Depends(get_db)):
         select(
             CallLog,
             Vendor.name.label("vendor_name"),
-            Campaign.name.label("campaign_name"),
+            func.coalesce(Campaign.display_name, Campaign.name).label("campaign_name"),
             Agent.name.label("agent_name"),
         )
         .join(Vendor, Vendor.id == CallLog.vendor_id)
