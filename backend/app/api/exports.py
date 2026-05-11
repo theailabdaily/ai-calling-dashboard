@@ -9,21 +9,24 @@ as `app/api/calls.py::list_calls` — when that file changes, this one must
 change with it.
 
 Filename + columns:
-  - The first column is always `source` — a friendly label for whichever funnel
-    filter produced the file (Interested + Callback, Interested only, etc.).
-  - Columns 4-5 are `final_lead_status_date` + `final_lead_status` — the date
-    and lifecycle of the *last call ever made to this lead*, computed across
-    ALL calls (not just the filtered set). So even if you export only the
-    "Interested" calls, you still see whether the lead later went cold.
-  - Filename is `<PREFIX>_<ddmmyy>_<HHMM>.csv` where PREFIX is INTC / INT /
-    CALLB / LEADS depending on the funnel stage. Makes it obvious from the
-    download folder which slice each file represents.
+  - First column is `source` — a friendly label for whichever funnel filter
+    produced the file ("Interested + Callback", "Interested only", etc.).
+  - Columns 4-6 are `final_lead_status_date` / `final_lead_status_time` /
+    `final_lead_status` — the IST date, IST time, and lifecycle of the
+    *last call ever made to this lead*, computed across ALL calls (not just
+    the filtered set). So even if you export only the "Interested" calls,
+    you still see whether the lead later went cold.
+  - Filename: `Hunar_<PREFIX>_<ddmmyy>_<HHMM>.csv` where PREFIX is
+    INTC / INT / CALLB / LEADS depending on the funnel stage. `Hunar_` prefix
+    keeps things tidy when SquadStack exports are added later. Time stamps
+    in the filename are IST regardless of the container's TZ.
 """
 from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -37,16 +40,19 @@ from app.services.metrics import MetricFilters
 
 router = APIRouter(prefix="/api/export", tags=["export"])
 
+IST = ZoneInfo("Asia/Kolkata")
 
-# Column order: source first, then the two identity columns (name + number),
-# then the final-status pair, then the call-level detail in roughly the order
-# a BD would scan them.
+
+# Column order: source first, then identity (name + number), then the final-status
+# date+time+status trio, then call-level details in roughly the order a BD would
+# scan them.
 CSV_FIELDS = [
     "source",                    # funnel filter label (Interested + Callback, etc.)
     "callee_name",
     "mobile_number",
-    "final_lead_status_date",    # latest call date across ALL calls for this lead
-    "final_lead_status",         # lifecycle_status of that latest call
+    "final_lead_status_date",    # IST date only — e.g. 2026-05-11
+    "final_lead_status_time",    # IST time only — e.g. 8:35:02 AM
+    "final_lead_status",         # lifecycle_status of the latest call across ALL calls
     "call_id",
     "vendor",
     "campaign",
@@ -89,18 +95,45 @@ _SOURCE_LABELS = {
 }
 
 
+def _to_ist(dt):
+    """Postgres stores timestamps as UTC. If the value comes back naive (no
+    tzinfo) we assume UTC. Always return an IST-aware datetime or None."""
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST)
+
+
+def _fmt_date_ist(dt) -> str:
+    ist_dt = _to_ist(dt)
+    return ist_dt.strftime("%Y-%m-%d") if ist_dt else ""
+
+
+def _fmt_time_ist(dt) -> str:
+    """12-hour clock with AM/PM, no leading zero on hour (e.g. '8:35:02 AM')."""
+    ist_dt = _to_ist(dt)
+    if not ist_dt:
+        return ""
+    # %-I is non-zero-padded hour on Linux (Render). On the off-chance this
+    # ever runs on Windows the lstrip handles the padded variant.
+    try:
+        return ist_dt.strftime("%-I:%M:%S %p")
+    except ValueError:
+        return ist_dt.strftime("%I:%M:%S %p").lstrip("0")
+
+
 def _filename_for(funnel_stage: str | None) -> str:
-    """Filename prefix is derived from the funnel filter:
+    """Filename = Hunar_<PREFIX>_<ddmmyy>_<HHMM>.csv
 
       INTC   — Interested + Callback (top_priority / hotleads)
       INT    — Interested only / general interested
       CALLB  — Callback only / general callback
       LEADS  — anything else (full set, no funnel-stage filter, etc.)
 
-    Suffix is ddmmyy_HHMM in local server time. The Render container runs UTC
-    by default — if you want IST stamps, set TZ=Asia/Kolkata as a Render env var.
+    Stamp is IST regardless of container TZ.
     """
-    stamp = datetime.now().strftime("%d%m%y_%H%M")
+    stamp = datetime.now(IST).strftime("%d%m%y_%H%M")
     if funnel_stage in ("top_priority", "hotleads"):
         prefix = "INTC"
     elif funnel_stage in ("interested_only", "interested"):
@@ -109,7 +142,7 @@ def _filename_for(funnel_stage: str | None) -> str:
         prefix = "CALLB"
     else:
         prefix = "LEADS"
-    return f"{prefix}_{stamp}.csv"
+    return f"Hunar_{prefix}_{stamp}.csv"
 
 
 @router.get("/calls.csv")
@@ -223,8 +256,6 @@ async def export_calls(
         result = await db.execute(stmt)
         for row in result:
             call: CallLog = row[0]
-            # Pull qualitative result fields out as their own columns —
-            # easier to filter in Excel than digging through result_json.
             interest_level = (call.result or {}).get("interest_level", "") if call.result else ""
             next_step = (call.result or {}).get("next_step_interest", "") if call.result else ""
 
@@ -232,7 +263,8 @@ async def export_calls(
                 "source": source_label,
                 "callee_name": call.callee_name or "",
                 "mobile_number": call.mobile_number or "",
-                "final_lead_status_date": row.final_date.isoformat() if row.final_date else "",
+                "final_lead_status_date": _fmt_date_ist(row.final_date),
+                "final_lead_status_time": _fmt_time_ist(row.final_date),
                 "final_lead_status": row.final_status or "",
                 "call_id": str(call.id),
                 "vendor": row.vendor_name,
