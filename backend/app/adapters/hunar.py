@@ -191,6 +191,7 @@ class HunarAdapter(VendorAdapter):
             started_at=_parse_dt(raw.get("started_at")),
             ended_at=_parse_dt(raw.get("ended_at")),
             vendor_created_at=_parse_dt(raw.get("created_at")),
+            vendor_campaign_id=raw.get("campaign_id"),  # Hunar's real campaign UUID
         )
 
     # -----------------------------------------------------------------
@@ -209,6 +210,7 @@ class HunarAdapter(VendorAdapter):
             mapped = {
                 "id": payload.get("call_id"),
                 "request_id": payload.get("request_id"),
+                "campaign_id": payload.get("campaign_id"),
                 "agent_id": payload.get("agent_id"),
                 "mobile_number": payload.get("to_number"),
                 "from_phone_number": payload.get("from_number"),
