@@ -8,18 +8,22 @@ on screen and instead gets thousands. Same filter params and exact same logic
 as `app/api/calls.py::list_calls` — when that file changes, this one must
 change with it.
 
-Filename + columns:
-  - First column is `source` — a friendly label for whichever funnel filter
-    produced the file ("Interested + Callback", "Interested only", etc.).
-  - Columns 4-6 are `final_lead_status_date` / `final_lead_status_time` /
-    `final_lead_status` — the IST date, IST time, and lifecycle of the
-    *last call ever made to this lead*, computed across ALL calls (not just
-    the filtered set). So even if you export only the "Interested" calls,
-    you still see whether the lead later went cold.
-  - Filename: `Hunar_<PREFIX>_<ddmmyy>_<HHMM>.csv` where PREFIX is
-    INTC / INT / CALLB / LEADS depending on the funnel stage. `Hunar_` prefix
-    keeps things tidy when SquadStack exports are added later. Time stamps
-    in the filename are IST regardless of the container's TZ.
+Column layout (left to right):
+  A  final_lead_status_date    IST date of the lead's last call (across ALL calls)
+  B  final_lead_status_time    IST time of that last call (e.g. 8:35:02 AM)
+  C  source                    Funnel filter label + "_Hunar" (vendor tag)
+  D  callee_name
+  E  mobile_number              Stored as 91XXXXXXXXXX — leading "+" stripped
+  F  final_lead_status          Lifecycle of the lead's last call
+  G+ Per-call details (call_id, vendor, campaign, agent, status, etc.)
+
+The date / time / status trio reflect the lead's TRUE last call — even if the
+file is filtered to "Interested" calls only, those columns still tell you
+whether the lead later went cold.
+
+Filename: `Hunar_<PREFIX>_<ddmmyy>_<HHMM>.csv` where PREFIX is
+INTC / INT / CALLB / LEADS depending on the funnel stage. Timestamps in the
+filename are IST regardless of the container's TZ.
 """
 from __future__ import annotations
 
@@ -43,16 +47,13 @@ router = APIRouter(prefix="/api/export", tags=["export"])
 IST = ZoneInfo("Asia/Kolkata")
 
 
-# Column order: source first, then identity (name + number), then the final-status
-# date+time+status trio, then call-level details in roughly the order a BD would
-# scan them.
 CSV_FIELDS = [
-    "source",                    # funnel filter label (Interested + Callback, etc.)
-    "callee_name",
-    "mobile_number",
-    "final_lead_status_date",    # IST date only — e.g. 2026-05-11
-    "final_lead_status_time",    # IST time only — e.g. 8:35:02 AM
-    "final_lead_status",         # lifecycle_status of the latest call across ALL calls
+    "final_lead_status_date",    # A — IST date only, e.g. 2026-05-11
+    "final_lead_status_time",    # B — IST time only, e.g. 8:35:02 AM
+    "source",                    # C — funnel label + "_Hunar"
+    "callee_name",               # D
+    "mobile_number",             # E — no leading "+"
+    "final_lead_status",         # F — lifecycle_status of the latest call
     "call_id",
     "vendor",
     "campaign",
@@ -79,7 +80,8 @@ CSV_FIELDS = [
 EXPORT_ROW_CAP = 50000
 
 
-# Friendly label per funnel_stage value. Shown in the `source` column.
+# Friendly base label per funnel_stage value. "_Hunar" is appended at runtime
+# so the source column carries the vendor tag too.
 _SOURCE_LABELS = {
     "leads":           "All leads dialled",
     "connected":       "Connected",
@@ -97,7 +99,7 @@ _SOURCE_LABELS = {
 
 def _to_ist(dt):
     """Postgres stores timestamps as UTC. If the value comes back naive (no
-    tzinfo) we assume UTC. Always return an IST-aware datetime or None."""
+    tzinfo) we assume UTC. Always returns an IST-aware datetime or None."""
     if not dt:
         return None
     if dt.tzinfo is None:
@@ -115,12 +117,23 @@ def _fmt_time_ist(dt) -> str:
     ist_dt = _to_ist(dt)
     if not ist_dt:
         return ""
-    # %-I is non-zero-padded hour on Linux (Render). On the off-chance this
-    # ever runs on Windows the lstrip handles the padded variant.
     try:
-        return ist_dt.strftime("%-I:%M:%S %p")
+        return ist_dt.strftime("%-I:%M:%S %p")  # Linux (Render)
     except ValueError:
-        return ist_dt.strftime("%I:%M:%S %p").lstrip("0")
+        return ist_dt.strftime("%I:%M:%S %p").lstrip("0")  # Windows fallback
+
+
+def _clean_mobile(num: str | None) -> str:
+    """Strip the leading '+' so downstream tools (Excel, dialers) don't
+    accidentally treat the column as a formula or eat the prefix."""
+    if not num:
+        return ""
+    return num.lstrip("+")
+
+
+def _source_label(funnel_stage: str | None) -> str:
+    base = _SOURCE_LABELS.get(funnel_stage or "", "All leads")
+    return f"{base}_Hunar"
 
 
 def _filename_for(funnel_stage: str | None) -> str:
@@ -242,7 +255,7 @@ async def export_calls(
     if extra:
         stmt = stmt.where(and_(*extra))
 
-    source_label = _SOURCE_LABELS.get(funnel_stage or "", "All leads")
+    source_label = _source_label(funnel_stage)
 
     async def gen():
         # Streamed write — avoids materializing the full CSV in memory for
@@ -260,11 +273,11 @@ async def export_calls(
             next_step = (call.result or {}).get("next_step_interest", "") if call.result else ""
 
             writer.writerow({
-                "source": source_label,
-                "callee_name": call.callee_name or "",
-                "mobile_number": call.mobile_number or "",
                 "final_lead_status_date": _fmt_date_ist(row.final_date),
                 "final_lead_status_time": _fmt_time_ist(row.final_date),
+                "source": source_label,
+                "callee_name": call.callee_name or "",
+                "mobile_number": _clean_mobile(call.mobile_number),
                 "final_lead_status": row.final_status or "",
                 "call_id": str(call.id),
                 "vendor": row.vendor_name,
