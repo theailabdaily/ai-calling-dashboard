@@ -1,5 +1,6 @@
 'use client';
-import { Copy, Info } from 'lucide-react';
+import { useState } from 'react';
+import { ChevronDown, Copy, Info } from 'lucide-react';
 import type { DuplicateCampaign } from '@/types';
 import { fmt } from '@/lib/api';
 
@@ -29,73 +30,101 @@ export default function DuplicateLeadsCard({ count, rows, dialAttempts, campaign
   // and burning visual real estate.
   if (count <= 0) return null;
 
+  // Collapsed by default. Detail can be heavy (long campaign list) so we let
+  // the user opt in to see it rather than dominating the page on every load.
+  const [expanded, setExpanded] = useState(false);
+
   const extraDials = estimateExtraDials(rows, count, dialAttempts);
   const avgKDisplay = (rows / count).toFixed(1);
 
   return (
     <div className="card p-5 border-amber-200 bg-amber-50/40">
-      <div className="flex items-baseline justify-between gap-3 mb-1">
+      {/* Clickable header. Even when collapsed, the count and the
+          "accidental re-uploads?" hint stay visible so the at-a-glance
+          number isn't hidden behind a click. */}
+      <button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        aria-expanded={expanded}
+        aria-controls="duplicates-detail"
+        className="w-full text-left flex items-baseline justify-between gap-3
+                   -m-1 p-1 rounded-md hover:bg-amber-100/40 transition-colors
+                   focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+      >
         <h3 className="text-sm font-semibold text-brand-navy flex items-center gap-1.5">
           <Copy size={14} className="text-amber-600" />
           Cross-campaign duplicates · {fmt.int(count)}
+          <ChevronDown
+            size={14}
+            className={`text-surface-500 transition-transform duration-150 ${
+              expanded ? 'rotate-180' : ''
+            }`}
+          />
         </h3>
         <span className="text-[11px] text-amber-700/70">accidental re-uploads?</span>
-      </div>
-      <p className="text-xs text-surface-600 mb-3">
-        Phones dialed in <strong>{avgKDisplay}</strong> campaigns on average. Same
-        person, multiple uploads — usually a re-upload of an old lead list. Consumes
-        extra dials without expanding reach.
-      </p>
+      </button>
 
-      <div className="grid grid-cols-3 gap-3">
-        <Stat
-          label="Duplicate leads"
-          value={fmt.int(count)}
-          hint={`across ${fmt.int(rows)} rows`}
-        />
-        <Stat
-          label="Dials spent on dupes"
-          value={fmt.int(dialAttempts)}
-          hint="initial + retries"
-        />
-        <Stat
-          label="≈ Avoidable dials"
-          value={fmt.int(extraDials)}
-          hint="if deduped pre-upload"
-          tip="Estimate — assumes deduping would have left only one campaign's worth of dials per lead. Re-targeting may be intentional, in which case this is not waste."
-        />
-      </div>
+      {/* Detail — description, stats, and per-campaign breakdown. Hidden
+          until the header is clicked. */}
+      {expanded && (
+        <div id="duplicates-detail" className="mt-3">
+          <p className="text-xs text-surface-600 mb-3">
+            Phones dialed in <strong>{avgKDisplay}</strong> campaigns on average. Same
+            person, multiple uploads — usually a re-upload of an old lead list. Consumes
+            extra dials without expanding reach.
+          </p>
 
-      {/* Per-campaign detail — show which campaigns share the phones. Useful
-          for the operator to identify the bad upload and prevent future ones. */}
-      {campaigns.length > 0 && (
-        <div className="mt-4 pt-3 border-t border-amber-200/70">
-          <div className="text-[11px] font-medium uppercase tracking-wider text-surface-500 mb-2">
-            Campaigns sharing these leads
+          <div className="grid grid-cols-3 gap-3">
+            <Stat
+              label="Duplicate leads"
+              value={fmt.int(count)}
+              hint={`across ${fmt.int(rows)} rows`}
+            />
+            <Stat
+              label="Dials spent on dupes"
+              value={fmt.int(dialAttempts)}
+              hint="initial + retries"
+            />
+            <Stat
+              label="≈ Avoidable dials"
+              value={fmt.int(extraDials)}
+              hint="if deduped pre-upload"
+              tip="Estimate — assumes deduping would have left only one campaign's worth of dials per lead. Re-targeting may be intentional, in which case this is not waste."
+            />
           </div>
-          <div className="space-y-1.5">
-            {campaigns.map(c => (
-              <div
-                key={c.campaign_id}
-                className="flex items-center justify-between gap-3 px-2 py-1.5 rounded-md bg-white/60 hover:bg-white transition-colors"
-              >
-                <div className="flex items-baseline gap-2 min-w-0">
-                  <span className="text-[12px] font-medium text-surface-800 truncate">
-                    {c.campaign_name}
-                  </span>
-                  {c.started_at && (
-                    <span className="text-[10px] text-surface-500 shrink-0">
-                      {c.started_at.slice(0, 10)}
-                    </span>
-                  )}
-                </div>
-                <div className="text-[11px] tabular-nums shrink-0">
-                  <span className="font-semibold text-brand-navy">{fmt.int(c.shared_leads)}</span>
-                  <span className="text-surface-500 ml-1">shared</span>
-                </div>
+
+          {/* Per-campaign detail — show which campaigns share the phones. Useful
+              for the operator to identify the bad upload and prevent future ones. */}
+          {campaigns.length > 0 && (
+            <div className="mt-4 pt-3 border-t border-amber-200/70">
+              <div className="text-[11px] font-medium uppercase tracking-wider text-surface-500 mb-2">
+                Campaigns sharing these leads
               </div>
-            ))}
-          </div>
+              <div className="space-y-1.5">
+                {campaigns.map(c => (
+                  <div
+                    key={c.campaign_id}
+                    className="flex items-center justify-between gap-3 px-2 py-1.5 rounded-md bg-white/60 hover:bg-white transition-colors"
+                  >
+                    <div className="flex items-baseline gap-2 min-w-0">
+                      <span className="text-[12px] font-medium text-surface-800 truncate">
+                        {c.campaign_name}
+                      </span>
+                      {c.started_at && (
+                        <span className="text-[10px] text-surface-500 shrink-0">
+                          {c.started_at.slice(0, 10)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[11px] tabular-nums shrink-0">
+                      <span className="font-semibold text-brand-navy">{fmt.int(c.shared_leads)}</span>
+                      <span className="text-surface-500 ml-1">shared</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
