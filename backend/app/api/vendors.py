@@ -41,9 +41,13 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
     out: list[CampaignOut] = []
     for row in result:
         c: Campaign = row[0]
-        date_str = c.started_at.strftime("%Y-%m-%d") if c.started_at else None
-        parts = [p for p in (date_str, row.vendor_name, c.name) if p]
-        display = " — ".join(parts)
+        # Prefer Campaign.display_name (user-set / synced from Hunar UI) over the auto label
+        if c.display_name:
+            display = c.display_name
+        elif c.vendor_campaign_id:
+            display = f"Campaign {c.vendor_campaign_id[:8]}"
+        else:
+            display = f"Campaign {c.vendor_request_id[:8]}"
         out.append(CampaignOut(
             id=c.id,
             name=c.name,
