@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText, CalendarDays } from 'lucide-react';
+import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText, CalendarDays, Search } from 'lucide-react';
 import { cn } from '@/lib/api';
 
 const NAV = [
@@ -12,17 +12,17 @@ const NAV = [
   { href: '/vendors',         label: 'Vendor Analysis',   icon: Users },
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/calls',           label: 'Call Logs',         icon: Phone },
+  { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
   { href: '/ledger',          label: 'Activity Log',      icon: ScrollText },
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
 ];
 
 // Desktop sidebar. Hidden on viewports below lg (1024px) — those use MobileNav.
+// On the BDA lookup hostname (ai-lookup.vercel.app), the root layout skips
+// rendering this component entirely via the x-is-lookup-host header check,
+// so no pathname-based suppression is needed here.
 export default function Sidebar() {
   const pathname = usePathname();
-  // The /lookup routes are a separate, BDA-only mini-app — no nav, no
-  // analytics chrome. Render nothing here so the lookup page can own the
-  // entire viewport.
-  if (pathname?.startsWith('/lookup')) return null;
   return (
     <aside className="hidden lg:flex w-64 shrink-0 bg-black text-white min-h-screen flex-col sticky top-0 h-screen">
       <div className="p-5 border-b border-white/10">
