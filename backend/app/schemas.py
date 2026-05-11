@@ -234,15 +234,18 @@ class VendorRow(BaseModel):
 class CampaignRow(BaseModel):
     campaign_id: str
     campaign_name: str
-    display_name: str | None = None   # "{date} — {vendor} — {name}"
+    display_name: str | None = None   # User-set name from Hunar UI; falls back to "Campaign <id-prefix>"
     vendor_id: str
     vendor_name: str | None = None
     started_at: str | None
-    total_calls: int
+    unique_leads: int = 0             # Distinct phones in this campaign — denominator for connection_rate
+    total_calls: int                  # Total dial attempts (includes retries)
     connected_calls: int
+    engaged_calls: int = 0
     interested_calls: int
-    connection_rate: float
-    interest_rate: float
+    connection_rate: float            # connected_calls / unique_leads
+    engagement_rate: float = 0.0      # engaged_calls / connected_calls
+    interest_rate: float              # interested_calls / connected_calls
 
 
 class CallListItem(BaseModel):
