@@ -70,6 +70,11 @@ class NormalizedCall:
     ended_at: datetime | None
     vendor_created_at: datetime | None
 
+    # Optional: vendor's true campaign UUID (distinct from request_id which is per-bulk-request).
+    # Hunar exposes this in /calls/ responses as `campaign_id`. When set, multiple
+    # bulk requests can be grouped under one named campaign in the vendor UI.
+    vendor_campaign_id: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Adapter interface
