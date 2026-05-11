@@ -9,8 +9,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, calls, dod_leads, exports, hourly, ingestion, internal, ledger, lookup, overview, vendorsfrom app.config import get_settings
+from app.api import agents, calls, dod_leads, exports, hourly, ingestion, internal, ledger, lookup, overview, vendors
+from app.config import get_settings
 from app.jobs.sync import sync_all_vendors
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s -- %(message)s")
 logger = logging.getLogger(__name__)
 
