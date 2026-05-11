@@ -4,7 +4,7 @@ import { Calendar } from 'lucide-react';
 import { fmt } from '@/lib/api';
 import type { HeatmapCell } from '@/types';
 
-type Metric = 'volume' | 'connection' | 'interest';
+type Metric = 'volume' | 'connection' | 'interest' | 'callback';
 
 type Props = { data: HeatmapCell[] };
 
@@ -30,6 +30,7 @@ function colorFor(value: number, hasData: boolean): string {
 function metricValue(c: HeatmapCell, m: Metric, maxVol: number): number {
   if (m === 'volume') return maxVol > 0 ? c.total_calls / maxVol : 0;
   if (m === 'connection') return c.connection_rate;
+  if (m === 'callback') return c.callback_rate ?? 0;
   return c.interest_rate;
 }
 
@@ -57,7 +58,7 @@ export default function HeatmapDowHour({ data }: Props) {
         </h3>
         <div className="flex items-center gap-1 text-xs">
           <span className="text-surface-500 mr-1">Color by:</span>
-          {(['volume', 'connection', 'interest'] as Metric[]).map(m => (
+          {(['volume', 'connection', 'interest', 'callback'] as Metric[]).map(m => (
             <button
               key={m}
               type="button"
@@ -68,7 +69,13 @@ export default function HeatmapDowHour({ data }: Props) {
                   : 'bg-surface-100 text-surface-600 hover:bg-surface-200'
               }`}
             >
-              {m === 'volume' ? 'Volume' : m === 'connection' ? 'Connection %' : 'Interest %'}
+              {m === 'volume'
+                ? 'Volume'
+                : m === 'connection'
+                ? 'Connection %'
+                : m === 'interest'
+                ? 'Interest %'
+                : 'Callback %'}
             </button>
           ))}
         </div>
@@ -105,6 +112,7 @@ export default function HeatmapDowHour({ data }: Props) {
                       `${fmt.int(c.total_calls)} calls, ${fmt.int(c.connected_calls)} connected\n` +
                       `Connection: ${fmt.pct(c.connection_rate)}\n` +
                       `Interest: ${fmt.pct(c.interest_rate)}\n` +
+                      `Callback: ${fmt.pct(c.callback_rate ?? 0)}\n` +
                       `Avg duration: ${fmt.duration(c.avg_duration_seconds)}`
                     : `${DOW_LABEL[dow]} ${hourLabel(h)} — never tested`;
                   return (
