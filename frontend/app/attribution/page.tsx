@@ -921,6 +921,7 @@ export default function LeadAttributionPage() {
                 bucketValues={bucketValuesA}
                 bucketSel={bucketSelA}
                 setBucketSel={setBucketSelA}
+                filteredCount={filteredACount}
               />
             ) : (
               fileA ? (
@@ -1136,6 +1137,7 @@ function DashboardSourcePanel({
   vendors, campaigns, agents,
   vendorIds, setVendorIds, campaignIds, setCampaignIds, agentIds, setAgentIds,
   bucketValues, bucketSel, setBucketSel,
+  filteredCount,
 }: {
   range: DashboardRange;
   setRange: (r: DashboardRange) => void;
@@ -1152,6 +1154,7 @@ function DashboardSourcePanel({
   bucketValues: string[];
   bucketSel: Set<string>;
   setBucketSel: (s: Set<string>) => void;
+  filteredCount: number;
 }) {
   // Campaign list narrows to selected vendors if any vendor is picked, so the
   // dropdown stays scoped to what the user is actually looking at.
@@ -1300,7 +1303,14 @@ function DashboardSourcePanel({
               <span className="truncate">{fileA.filename}</span>
             </div>
             <div className="text-[10px] text-surface-500 mt-0.5">
-              {fmtInt(fileA.rows.length)} unique leads · {fileA.columns.length} columns
+              {filteredCount === fileA.rows.length ? (
+                <>{fmtInt(fileA.rows.length)} unique leads · {fileA.columns.length} columns</>
+              ) : (
+                <>
+                  <strong className="text-brand-pink">{fmtInt(filteredCount)}</strong>
+                  <span> of {fmtInt(fileA.rows.length)} leads after bucket filter · {fileA.columns.length} columns</span>
+                </>
+              )}
             </div>
           </div>
           <button
