@@ -93,8 +93,8 @@ async def _serialize(db: AsyncSession, entry: LedgerEntry) -> LedgerEntryOut:
         vendor_name = v.name if v else None
 
     if entry.campaign_id:
-        c = (await db.execute(select(Campaign).where(Campaign.id == entry.campaign_id))).scalar_one_or_none()
-         if c:
+         c = (await db.execute(select(Campaign).where(Campaign.id == entry.campaign_id))).scalar_one_or_none()
+        if c:
             campaign_name = c.display_name or c.name
             campaign_vendor_request_id = c.vendor_request_id
         live_stats = await _live_stats_for_campaign(db, entry.campaign_id)
