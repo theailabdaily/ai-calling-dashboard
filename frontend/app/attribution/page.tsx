@@ -61,9 +61,6 @@ type ColumnMappingA = {
 type ColumnMappingB = {
   phone: string;
   date: string;
-type ColumnMappingB = {
-  phone: string;
-  date: string;
   amount?: string;
   amountPaid?: string;
   // Display-only mappings. Shown as columns in the preview tables and
