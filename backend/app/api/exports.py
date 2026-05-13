@@ -192,7 +192,7 @@ async def export_calls(
         select(
             CallLog,
             Vendor.name.label("vendor_name"),
-            Campaign.name.label("campaign_name"),
+            func.coalesce(Campaign.display_name, Campaign.name).label("campaign_name"),
             Agent.name.label("agent_name"),
             latest_per_lead.c.final_date,
             latest_per_lead.c.final_status,
