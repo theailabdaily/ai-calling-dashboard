@@ -4,7 +4,7 @@ import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
-  LayoutDashboard, Users, Phone, Bot, Send, Clock, Menu, X, ScrollText, CalendarDays, Search,
+  LayoutDashboard, Users, Phone, Bot, Send, Clock, Menu, X, ScrollText, CalendarDays, Search, Shuffle,
 } from 'lucide-react';
 import { cn } from '@/lib/api';
 
@@ -21,6 +21,7 @@ const NAV = [
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
   { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
+  { href: '/attribution',     label: 'Lead Attribution',  icon: Shuffle },
 ];
 
 // Mobile-only nav: a fixed top bar with hamburger + logo, plus a slide-in
