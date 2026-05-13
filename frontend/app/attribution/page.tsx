@@ -1069,6 +1069,7 @@ export default function LeadAttributionPage() {
           <h2 className="text-sm font-medium text-brand-navy mb-2">Step 4 — Results</h2>
           <ResultsBlock
             results={results}
+            mappingA={mappingA}
             mappingB={mappingB}
             hasAmount={!!mappingB.amount}
             hasPaid={!!mappingB.amountPaid}
@@ -1726,9 +1727,10 @@ function CustomFilterRow({
 }
 
 function ResultsBlock({
-  results, mappingB, hasAmount, hasPaid,
+  results, mappingA, mappingB, hasAmount, hasPaid,
 }: {
   results: Results;
+  mappingA: ColumnMappingA;
   mappingB: ColumnMappingB;
   hasAmount: boolean;
   hasPaid: boolean;
@@ -1789,6 +1791,34 @@ function ResultsBlock({
         </div>
       )}
 
+      {/* Inline previews — expandable cards that let the user spot-check
+          matches without downloading. Each section is independently
+          collapsible and paginated (25 rows per page). */}
+      <ResultDetailSection
+        title="Attributed"
+        count={results.attributedPairs.length}
+        chip="green"
+        matchedPairs={results.attributedPairs}
+        mappingA={mappingA}
+        mappingB={mappingB}
+      />
+      <ResultDetailSection
+        title="Pre-existing"
+        count={results.preExistingPairs.length}
+        chip="amber"
+        matchedPairs={results.preExistingPairs}
+        mappingA={mappingA}
+        mappingB={mappingB}
+      />
+      <ResultDetailSection
+        title="Unmatched"
+        count={results.unmatchedRows.length}
+        chip="gray"
+        unmatchedRows={results.unmatchedRows}
+        mappingA={mappingA}
+        mappingB={mappingB}
+      />
+
       <div className="flex flex-wrap gap-2 mt-3">
         <button
           type="button"
@@ -1816,6 +1846,153 @@ function ResultsBlock({
         </button>
       </div>
     </>
+  );
+}
+
+// Expandable preview card showing the rows behind one results bucket
+// (Attributed / Pre-existing / Unmatched). Lets the user spot-check
+// matches inline before deciding to download the full list. Paginated 25
+// rows per page so the DOM doesn't explode on large datasets.
+function ResultDetailSection({
+  title, count, chip,
+  matchedPairs, unmatchedRows,
+  mappingA, mappingB,
+}: {
+  title: string;
+  count: number;
+  chip: 'green' | 'amber' | 'gray';
+  matchedPairs?: MatchedPair[];
+  unmatchedRows?: Record<string, string>[];
+  mappingA: ColumnMappingA;
+  mappingB: ColumnMappingB;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [showCount, setShowCount] = useState(25);
+
+  if (count === 0) return null;
+
+  // Discriminator: matched view shows lag/B-date/amount/status; unmatched
+  // view only has A's columns to show.
+  const isUnmatched = !matchedPairs;
+  const totalLen = isUnmatched
+    ? (unmatchedRows?.length ?? 0)
+    : (matchedPairs?.length ?? 0);
+  const hasMore = totalLen > showCount;
+
+  const chipClass =
+    chip === 'green' ? 'bg-emerald-50 text-emerald-700' :
+    chip === 'amber' ? 'bg-amber-50 text-amber-700' :
+    'bg-surface-100 text-surface-600';
+
+  return (
+    <div className="card overflow-hidden mt-3">
+      <button
+        type="button"
+        onClick={() => setExpanded(e => !e)}
+        className="w-full px-3 py-2 flex items-center gap-2 text-left hover:bg-surface-50 transition-colors"
+      >
+        {expanded
+          ? <ChevronDown size={14} className="text-surface-400" />
+          : <ChevronRight size={14} className="text-surface-400" />}
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${chipClass}`}>{title}</span>
+        <span className="text-sm text-brand-navy font-medium">{fmtInt(count)} leads</span>
+        <span className="text-[11px] text-surface-400 ml-auto">
+          {expanded ? 'Tap to collapse' : 'Tap to preview rows'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="border-t border-surface-100 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-surface-50 text-[10px] uppercase tracking-wider text-surface-500">
+              <tr>
+                <th className="text-left py-2 px-3 whitespace-nowrap">Phone</th>
+                <th className="text-left py-2 px-3 whitespace-nowrap">Name</th>
+                <th className="text-left py-2 px-3 whitespace-nowrap">Bucket</th>
+                <th className="text-right py-2 px-3 whitespace-nowrap">A date</th>
+                {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">B date</th>}
+                {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">Lag</th>}
+                {!isUnmatched && mappingB.amount && <th className="text-right py-2 px-3 whitespace-nowrap">Amount</th>}
+                {!isUnmatched && mappingB.status && <th className="text-left py-2 px-3 whitespace-nowrap">Status</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {(isUnmatched
+                ? (unmatchedRows ?? []).slice(0, showCount).map(r => ({ a: r, b: {} as Record<string, string>, aDateIso: parseDate(r[mappingA.date] ?? ''), bDateIso: null, lagDays: null }))
+                : (matchedPairs ?? []).slice(0, showCount)
+              ).map((item, i) => {
+                const aRow = item.a;
+                const bRow = item.b;
+                const name = aRow.callee_name || aRow.name || '';
+                const bucket = aRow._bucket;
+                const amountStr = bRow && mappingB.amount ? (bRow[mappingB.amount] ?? '') : '';
+                const amountNum = parseFloat(amountStr);
+                const statusStr = bRow && mappingB.status ? (bRow[mappingB.status] ?? '') : '';
+                return (
+                  <tr key={i} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
+                    <td className="py-2 px-3 tabular-nums text-surface-700 whitespace-nowrap">
+                      {normalizePhone(aRow[mappingA.phone] ?? '') || <span className="text-surface-300">—</span>}
+                    </td>
+                    <td className="py-2 px-3 text-surface-700">
+                      {name || <span className="text-surface-300">—</span>}
+                    </td>
+                    <td className="py-2 px-3">
+                      {bucket ? (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                          bucket === 'top_priority'
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-surface-100 text-surface-600'
+                        }`}>
+                          {BUCKET_LABELS[bucket] || bucket}
+                        </span>
+                      ) : <span className="text-surface-300">—</span>}
+                    </td>
+                    <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                      {item.aDateIso || <span className="text-surface-300">—</span>}
+                    </td>
+                    {!isUnmatched && (
+                      <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                        {item.bDateIso || <span className="text-surface-300">—</span>}
+                      </td>
+                    )}
+                    {!isUnmatched && (
+                      <td className="py-2 px-3 text-right tabular-nums text-surface-500 whitespace-nowrap">
+                        {item.lagDays != null ? `${item.lagDays}d` : <span className="text-surface-300">—</span>}
+                      </td>
+                    )}
+                    {!isUnmatched && mappingB.amount && (
+                      <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                        {!Number.isNaN(amountNum) && amountStr !== ''
+                          ? fmtINR(amountNum)
+                          : (amountStr || <span className="text-surface-300">—</span>)}
+                      </td>
+                    )}
+                    {!isUnmatched && mappingB.status && (
+                      <td className="py-2 px-3 text-surface-700">
+                        {statusStr || <span className="text-surface-300">—</span>}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {hasMore && (
+            <div className="px-3 py-2 border-t border-surface-100 bg-surface-50/50 flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-surface-500">
+                Showing {fmtInt(showCount)} of {fmtInt(totalLen)} · download the full list below for all rows
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowCount(c => c + 25)}
+                className="text-brand-pink hover:underline"
+              >
+                Show next 25
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
