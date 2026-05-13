@@ -7,14 +7,14 @@ import { cn } from '@/lib/api';
 
 const NAV = [
   { href: '/',                label: 'Overview',          icon: LayoutDashboard },
-  { href: '/hourly-insights', label: 'Hourly Insights',   icon: Clock },
   { href: '/dod-leads',       label: 'Leads',             icon: CalendarDays },
+  { href: '/calls',           label: 'Call Logs',         icon: Phone },
+  { href: '/hourly-insights', label: 'Hourly Insights',   icon: Clock },
+  { href: '/ledger',          label: 'Activity Log',      icon: ScrollText },
   { href: '/vendors',         label: 'Vendor Analysis',   icon: Users },
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
-  { href: '/calls',           label: 'Call Logs',         icon: Phone },
-  { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
-  { href: '/ledger',          label: 'Activity Log',      icon: ScrollText },
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
+  { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
 ];
 
 // Desktop sidebar. Hidden on viewports below lg (1024px) — those use MobileNav.
