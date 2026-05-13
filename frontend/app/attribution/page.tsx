@@ -76,7 +76,6 @@ type Results = {
   keyMatched: number;
   preExisting: number;
   attributed: number;
-  attributedSuccess: number;
   unmatched: number;
   revenueTotal: number;
   revenuePaid: number;
@@ -448,13 +447,6 @@ function runAttribution(input: RunInput): Results {
     bDateIso: string | null;
     amount: number;
     amountPaid: number;
-    statusIsSuccess: boolean;
-  };
-
-  const isSuccess = (statusRaw: string): boolean => {
-    const s = statusRaw.toLowerCase();
-    return s === 'success' || s === 'successful' || s === 'paid'
-      || s === 'completed' || s === 'complete' || s === 'captured';
   };
 
   const bIndex = new Map<string, IndexedB[]>();
@@ -466,7 +458,6 @@ function runAttribution(input: RunInput): Results {
       bDateIso: parseDate(row[mappingB.date] ?? ''),
       amount: mappingB.amount ? (parseFloat(row[mappingB.amount]) || 0) : 0,
       amountPaid: mappingB.amountPaid ? (parseFloat(row[mappingB.amountPaid]) || 0) : 0,
-      statusIsSuccess: mappingB.status ? isSuccess(row[mappingB.status] ?? '') : true,
     };
     if (!bIndex.has(phone)) bIndex.set(phone, []);
     bIndex.get(phone)!.push(entry);
@@ -480,7 +471,6 @@ function runAttribution(input: RunInput): Results {
   const unmatchedRows: Record<string, string>[] = [];
   let revenueTotal = 0;
   let revenuePaid = 0;
-  let attributedSuccess = 0;
 
   for (const aRow of filteredA) {
     const aPhone = normalizePhone(aRow[mappingA.phone] ?? '');
@@ -512,7 +502,6 @@ function runAttribution(input: RunInput): Results {
       });
       revenueTotal += matched.amount;
       revenuePaid  += matched.amountPaid;
-      if (matched.statusIsSuccess) attributedSuccess++;
     } else if (earliestBefore || candidates.length > 0) {
       const b = earliestBefore ?? candidates[0];
       preExistingPairs.push({
@@ -530,7 +519,6 @@ function runAttribution(input: RunInput): Results {
     keyMatched: attributedPairs.length + preExistingPairs.length,
     preExisting: preExistingPairs.length,
     attributed: attributedPairs.length,
-    attributedSuccess,
     unmatched: unmatchedRows.length,
     revenueTotal, revenuePaid,
     attributedPairs, preExistingPairs, unmatchedRows,
@@ -1084,7 +1072,6 @@ export default function LeadAttributionPage() {
             mappingB={mappingB}
             hasAmount={!!mappingB.amount}
             hasPaid={!!mappingB.amountPaid}
-            hasStatus={!!mappingB.status}
           />
         </section>
       )}
@@ -1096,8 +1083,10 @@ export default function LeadAttributionPage() {
         rule passes. "B after A" excludes pre-existing customers — they would have converted anyway, so
         attributing them inflates the number. "Pre-existing" counts phones that exist in File&nbsp;B only
         with earlier dates. "Attributed" counts phones with at least one B-after-A match. Revenue uses the
-        matched B row (earliest qualifying). Bucket pills on File&nbsp;A use the same definitions as the
-        Leads page (Top Priority = interested + callback, etc.).
+        matched B row (earliest qualifying). The status filter on File&nbsp;B is purely user-driven — pick the
+        status values you want to count (e.g. <code>success</code>, <code>paid</code>, <code>authSuccess</code>)
+        and only those rows enter the match. Leaving the filter empty includes every status.
+        Bucket pills on File&nbsp;A use the same definitions as the Leads page (Top Priority = interested + callback, etc.).
       </div>
     </div>
   );
@@ -1636,7 +1625,13 @@ function BucketPills({
           const on = selected.has(v);
           const isDashboard = DASHBOARD_BUCKETS.includes(v);
           const labelText = isDashboard ? BUCKET_LABELS[v] : v;
-          const accent = v === 'top_priority' || v === 'success' || v === 'successful' || v === 'paid';
+          // Only top_priority gets the emerald "this is the good outcome"
+          // accent — it's a known meaningful bucket from the Leads page.
+          // We deliberately do NOT pattern-match on values like "success" /
+          // "paid" — different teams use different vocabularies (e.g.
+          // "authSuccess") and implicit semantics here would silently
+          // mis-color rows. Let the user's filter selection drive meaning.
+          const accent = v === 'top_priority';
           return (
             <button
               key={v}
@@ -1731,15 +1726,14 @@ function CustomFilterRow({
 }
 
 function ResultsBlock({
-  results, mappingB, hasAmount, hasPaid, hasStatus,
+  results, mappingB, hasAmount, hasPaid,
 }: {
   results: Results;
   mappingB: ColumnMappingB;
   hasAmount: boolean;
   hasPaid: boolean;
-  hasStatus: boolean;
 }) {
-  const { totalA, keyMatched, preExisting, attributed, attributedSuccess, unmatched, revenueTotal, revenuePaid } = results;
+  const { totalA, keyMatched, preExisting, attributed, unmatched, revenueTotal, revenuePaid } = results;
   return (
     <>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
@@ -1762,9 +1756,6 @@ function ResultsBlock({
             <FunnelRow label="Phone exists in File B (ever)" count={keyMatched} total={totalA} indent={1} />
             <FunnelRow label="B before A — pre-existing customers" count={preExisting} total={totalA} indent={2} chip="amber" chipLabel="Pre-existing" />
             <FunnelRow label="B after A — attributed" count={attributed} total={totalA} indent={2} chip="green" chipLabel="Attributed" emphasize />
-            {hasStatus && (
-              <FunnelRow label="Status = success (paid / successful / completed)" count={attributedSuccess} total={totalA} indent={3} />
-            )}
             <FunnelRow label="No match in File B" count={unmatched} total={totalA} indent={1} muted />
           </tbody>
         </table>
