@@ -324,14 +324,32 @@ function autoDetectA(columns: string[]): ColumnMappingA {
 }
 
 function autoDetectB(columns: string[]): ColumnMappingB {
+  // Only phone + date are auto-mapped by default. Amount / Paid / Status
+  // are user-opt-in via the "+ Add" pills in Step 2 — keeps the default
+  // panel clean and avoids surprise mappings on CSVs where these columns
+  // happen to exist but the user doesn't care about them.
   return {
-    phone:      findColumn(columns, ['mobile_number', 'phone_number', 'mobile', 'phone', 'user_phone', 'contact']) || columns[0] || '',
-    date:       findColumn(columns, ['payment_date', 'paid_at', 'transaction_date', 'order_date', 'purchase_date', 'created_at', '_date', 'date', 'timestamp']) || columns[0] || '',
-    amount:     findColumn(columns, ['totalamount', 'total_amount', 'total', 'amount', 'order_value', 'price']),
-    amountPaid: findColumn(columns, ['paidamount', 'paid_amount', 'paid', 'amount_paid']),
-    status:     findColumn(columns, ['status', 'payment_status', 'order_status', 'state']),
+    phone: findColumn(columns, ['mobile_number', 'phone_number', 'mobile', 'phone', 'user_phone', 'contact']) || columns[0] || '',
+    date:  findColumn(columns, ['payment_date', 'paid_at', 'transaction_date', 'order_date', 'purchase_date', 'created_at', '_date', 'date', 'timestamp']) || columns[0] || '',
   };
 }
+
+// Patterns used when the user clicks "+ Amount" / "+ Paid" / "+ Status".
+// The detected column is pre-selected; user can still change via the
+// dropdown. Defined as a constant so the same patterns drive both the
+// initial auto-detect (above) and the opt-in adds.
+const OPTIONAL_B_PATTERNS = {
+  amount:     ['totalamount', 'total_amount', 'total', 'amount', 'order_value', 'price'],
+  amountPaid: ['paidamount', 'paid_amount', 'paid', 'amount_paid'],
+  status:     ['status', 'payment_status', 'order_status', 'state'],
+} as const;
+
+type OptionalMappingB = keyof typeof OPTIONAL_B_PATTERNS;
+const OPTIONAL_B_LABELS: Record<OptionalMappingB, string> = {
+  amount: 'Amount',
+  amountPaid: 'Paid',
+  status: 'Status',
+};
 
 function detectCategoricalColumn(columns: string[], patterns: string[]): string | null {
   for (const p of patterns) {
@@ -739,12 +757,11 @@ export default function LeadAttributionPage() {
         } else {
           setFileB(data);
           setMappingB(autoDetectB(parsed.columns));
-          const col = detectCategoricalColumn(parsed.columns, STATUS_COL_PATTERNS);
-          if (col) {
-            setStatusSelB(new Set(uniqueValues(parsed.rows, col)));
-          } else {
-            setStatusSelB(new Set());
-          }
+          // Status pills no longer render on File B — Step 3 keeps the
+          // panel symmetric with File A's (just "+ Add filter"). The
+          // selection set stays empty so passesB() doesn't apply a hidden
+          // filter; users add a custom filter on `status` if they want it.
+          setStatusSelB(new Set());
           setFiltersB([]);
         }
         setResults(null);
@@ -974,9 +991,50 @@ export default function LeadAttributionPage() {
               <div className="text-[11px] uppercase tracking-wider text-surface-500">File B</div>
               <ColumnPicker label="Phone"  columns={fileB.columns} value={mappingB.phone} onChange={v => setMappingB(m => ({ ...m, phone: v }))} />
               <ColumnPicker label="Date"   columns={fileB.columns} value={mappingB.date}  onChange={v => setMappingB(m => ({ ...m, date: v  }))} />
-              <ColumnPicker label="Amount" columns={fileB.columns} value={mappingB.amount ?? ''}     onChange={v => setMappingB(m => ({ ...m, amount: v || undefined }))}     optional />
-              <ColumnPicker label="Paid"   columns={fileB.columns} value={mappingB.amountPaid ?? ''} onChange={v => setMappingB(m => ({ ...m, amountPaid: v || undefined }))} optional />
-              <ColumnPicker label="Status" columns={fileB.columns} value={mappingB.status ?? ''}     onChange={v => setMappingB(m => ({ ...m, status: v || undefined }))}     optional />
+
+              {/* Optional mappings — only rendered if the user opted in via
+                  the "+ Add" pills below. Each shows the same picker UI
+                  plus an × to remove. Amount / Paid drive the revenue
+                  KPI; Status is referenced by the bucket-aware downloads
+                  and the preview table. */}
+              {(['amount', 'amountPaid', 'status'] as OptionalMappingB[]).map(key => {
+                if (mappingB[key] === undefined) return null;
+                return (
+                  <ColumnPicker
+                    key={key}
+                    label={OPTIONAL_B_LABELS[key]}
+                    columns={fileB.columns}
+                    value={mappingB[key] ?? ''}
+                    onChange={v => setMappingB(m => ({ ...m, [key]: v || undefined }))}
+                    onRemove={() => setMappingB(m => ({ ...m, [key]: undefined }))}
+                  />
+                );
+              })}
+
+              {/* "+ Add" pills for unmapped optional fields. Clicking adds
+                  the picker above, pre-populated with the auto-detected
+                  column for that pattern (falls back to first column). */}
+              {(['amount', 'amountPaid', 'status'] as OptionalMappingB[]).some(k => mappingB[k] === undefined) && (
+                <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
+                  <span className="text-[10px] text-surface-400 self-center">Optional:</span>
+                  {(['amount', 'amountPaid', 'status'] as OptionalMappingB[]).map(key => {
+                    if (mappingB[key] !== undefined) return null;
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => {
+                          const detected = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS[key]]);
+                          setMappingB(m => ({ ...m, [key]: detected ?? fileB.columns[0] ?? '' }));
+                        }}
+                        className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
+                      >
+                        <Plus size={10} /> {OPTIONAL_B_LABELS[key]}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -1034,6 +1092,7 @@ export default function LeadAttributionPage() {
             customFilters={filtersB}
             setCustomFilters={setFiltersB}
             columns={fileB.columns}
+            hideBucketSection
           />
 
           <div className="flex items-center justify-between mt-2">
@@ -1489,7 +1548,7 @@ function LoadedFileChip({ data, onClear }: { data: CSVData; onClear: () => void 
 }
 
 function ColumnPicker({
-  label, columns, value, onChange, optional = false, disabled = false,
+  label, columns, value, onChange, optional = false, disabled = false, onRemove,
 }: {
   label: string;
   columns: string[];
@@ -1497,6 +1556,7 @@ function ColumnPicker({
   onChange: (v: string) => void;
   optional?: boolean;
   disabled?: boolean;
+  onRemove?: () => void;
 }) {
   return (
     <div className="flex items-center gap-2 text-xs">
@@ -1512,6 +1572,16 @@ function ColumnPicker({
         {optional && <option value="">(none)</option>}
         {columns.map(c => <option key={c} value={c}>{c}</option>)}
       </select>
+      {onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="text-surface-400 hover:text-red-600 p-0.5 shrink-0"
+          aria-label={`Remove ${label} mapping`}
+        >
+          <X size={11} />
+        </button>
+      )}
     </div>
   );
 }
