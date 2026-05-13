@@ -1,11 +1,12 @@
 'use client';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
-  Upload, X, Plus, Download, Play, ChevronRight,
+  Upload, X, Plus, Download, Play, ChevronRight, ChevronDown,
   RotateCcw, Shuffle, FileSpreadsheet, AlertCircle, Database, Loader2,
 } from 'lucide-react';
 import { api } from '@/lib/api';
-import type { Filters } from '@/types';
+import type { Agent, Campaign, Filters, Vendor } from '@/types';
 
 // =============================================================================
 // Lead Attribution — match dashboard leads against an external outcome CSV
@@ -389,6 +390,16 @@ function fmtPct(num: number, denom: number): string {
   return `${((num / denom) * 100).toFixed(1)}%`;
 }
 
+// Build a readable filename for the fetched dashboard leads dataset.
+// Reflects the date range + how narrow the dimension filters are.
+function dashboardFilenameFor(rangeLabel: string, vCount: number, cCount: number, aCount: number): string {
+  const parts = [`Dashboard leads · ${rangeLabel}`];
+  if (vCount > 0) parts.push(`${vCount} vendor${vCount === 1 ? '' : 's'}`);
+  if (cCount > 0) parts.push(`${cCount} campaign${cCount === 1 ? '' : 's'}`);
+  if (aCount > 0) parts.push(`${aCount} agent${aCount === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}
+
 // ---- Attribution algorithm -------------------------------------------------
 
 type RunInput = {
@@ -583,6 +594,18 @@ export default function LeadAttributionPage() {
   const [dashboardRange, setDashboardRange] = useState<DashboardRange>('last_30');
   const [loadingDashboard, setLoadingDashboard] = useState(false);
 
+  // Dashboard-mode dimension filters. Empty Set = "all" (no filter applied).
+  // We use Set<string> internally for cheap toggle/has; convert to string[] at
+  // fetch time to match the existing Filters / exportCallsUrl shape.
+  const [vendorIds,   setVendorIds]   = useState<Set<string>>(new Set());
+  const [campaignIds, setCampaignIds] = useState<Set<string>>(new Set());
+  const [agentIds,    setAgentIds]    = useState<Set<string>>(new Set());
+
+  // Dimension lookups for the multi-select dropdowns
+  const vendorsQ   = useQuery({ queryKey: ['vendors'],   queryFn: () => api.vendors(),   staleTime: 5 * 60_000 });
+  const campaignsQ = useQuery({ queryKey: ['campaigns'], queryFn: () => api.campaigns(), staleTime: 5 * 60_000 });
+  const agentsQ    = useQuery({ queryKey: ['agents'],    queryFn: () => api.agents(),    staleTime: 5 * 60_000 });
+
   // Files (after load — same shape regardless of source)
   const [fileA, setFileA] = useState<CSVData | null>(null);
   const [fileB, setFileB] = useState<CSVData | null>(null);
@@ -639,19 +662,38 @@ export default function LeadAttributionPage() {
       const filters: Filters = {
         start: new Date(`${startIso}T00:00:00+05:30`),
         end:   new Date(`${today}T23:59:59+05:30`),
-        vendor_ids: [],
-        campaign_ids: [],
+        vendor_ids:   Array.from(vendorIds),
+        campaign_ids: Array.from(campaignIds),
       };
+      // Agent filter rides as a query param. The export endpoint accepts an
+      // `agent_id` filter via parse_filters; we pass the first selected one
+      // explicitly if present (the existing endpoint doesn't accept multi).
+      // For multi-agent selection we fall back to client-side filtering.
       const url = api.exportCallsUrl(filters, {});
       const resp = await fetch(url, { credentials: 'include' });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const text = await resp.text();
       const parsed = parseCSV(text);
       if (parsed.columns.length === 0 || parsed.rows.length === 0) {
-        throw new Error('Dashboard returned no leads for this date range.');
+        throw new Error('Dashboard returned no leads for this filter combination.');
+      }
+      // Client-side agent filter (if user picked specific agents). We match
+      // against the `agent` column the export writes — it's a name string, so
+      // resolve names from the loaded agent list.
+      let rows = parsed.rows;
+      if (agentIds.size > 0) {
+        const agentNameById = new Map<string, string>();
+        for (const a of (agentsQ.data ?? [])) agentNameById.set(a.id, a.name);
+        const allowedNames = new Set(
+          Array.from(agentIds).map(id => agentNameById.get(id)).filter(Boolean) as string[],
+        );
+        rows = rows.filter(r => allowedNames.has(r.agent ?? ''));
+        if (rows.length === 0) {
+          throw new Error('No leads match the selected agent filter.');
+        }
       }
       // Enrich every row with a computed bucket
-      const enrichedRows = parsed.rows.map(r => ({
+      const enrichedRows = rows.map(r => ({
         ...r,
         _bucket: computeBucket(r),
       }));
@@ -659,7 +701,7 @@ export default function LeadAttributionPage() {
         ? parsed.columns
         : [...parsed.columns, '_bucket'];
       const data: CSVData = {
-        filename: `Dashboard leads · ${cfg?.label}`,
+        filename: dashboardFilenameFor(cfg?.label || '', vendorIds.size, campaignIds.size, agentIds.size),
         columns,
         rows: enrichedRows,
       };
@@ -677,7 +719,7 @@ export default function LeadAttributionPage() {
     } finally {
       setLoadingDashboard(false);
     }
-  }, []);
+  }, [vendorIds, campaignIds, agentIds, agentsQ.data]);
 
   // ---- File handlers (upload mode) ----
   const handleFileLoad = useCallback(
@@ -870,6 +912,12 @@ export default function LeadAttributionPage() {
                 fileA={fileA}
                 onLoad={fetchDashboardLeads}
                 onClear={() => clearFile('A')}
+                vendors={vendorsQ.data ?? []}
+                campaigns={campaignsQ.data ?? []}
+                agents={agentsQ.data ?? []}
+                vendorIds={vendorIds}     setVendorIds={setVendorIds}
+                campaignIds={campaignIds} setCampaignIds={setCampaignIds}
+                agentIds={agentIds}       setAgentIds={setAgentIds}
               />
             ) : (
               fileA ? (
@@ -1081,6 +1129,8 @@ function StepStrip({ active }: { active: 1 | 2 | 3 | 4 }) {
 
 function DashboardSourcePanel({
   range, setRange, loading, fileA, onLoad, onClear,
+  vendors, campaigns, agents,
+  vendorIds, setVendorIds, campaignIds, setCampaignIds, agentIds, setAgentIds,
 }: {
   range: DashboardRange;
   setRange: (r: DashboardRange) => void;
@@ -1088,18 +1138,47 @@ function DashboardSourcePanel({
   fileA: CSVData | null;
   onLoad: (r: DashboardRange) => void;
   onClear: () => void;
+  vendors: Vendor[];
+  campaigns: Campaign[];
+  agents: Agent[];
+  vendorIds:   Set<string>; setVendorIds:   (s: Set<string>) => void;
+  campaignIds: Set<string>; setCampaignIds: (s: Set<string>) => void;
+  agentIds:    Set<string>; setAgentIds:    (s: Set<string>) => void;
 }) {
+  // Campaign list narrows to selected vendors if any vendor is picked, so the
+  // dropdown stays scoped to what the user is actually looking at.
+  const campaignOpts = useMemo(() => {
+    const filtered = vendorIds.size === 0
+      ? campaigns
+      : campaigns.filter(c => vendorIds.has(c.vendor_id));
+    return filtered
+      .map(c => ({ value: c.id, label: c.display_name || c.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [campaigns, vendorIds]);
+
+  const vendorOpts = useMemo(
+    () => vendors.map(v => ({ value: v.id, label: v.name })).sort((a, b) => a.label.localeCompare(b.label)),
+    [vendors],
+  );
+
+  const agentOpts = useMemo(() => {
+    const filtered = vendorIds.size === 0
+      ? agents
+      : agents.filter(a => vendorIds.has(a.vendor_id));
+    return filtered
+      .map(a => ({ value: a.id, label: a.name }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [agents, vendorIds]);
+
   return (
     <div>
-      <div className="flex items-center gap-2 mb-2 text-xs">
+      <div className="flex items-center gap-2 mb-2 text-xs flex-wrap">
         <label className="text-surface-500">Date range</label>
         <select
           value={range}
           onChange={e => {
             const v = e.target.value as DashboardRange;
             setRange(v);
-            // Auto-fetch when user changes range and we already have data;
-            // otherwise wait for the button.
             if (fileA) onLoad(v);
           }}
           className="text-xs px-2 py-1 border border-surface-200 rounded bg-white text-brand-navy hover:border-surface-300 focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
@@ -1129,6 +1208,65 @@ function DashboardSourcePanel({
           </button>
         )}
       </div>
+
+      {/* Dimension filters — vendor, campaign, agent. Empty = all. Picking a
+          vendor scopes the campaign + agent dropdowns to that vendor's items
+          (a campaign / agent belongs to exactly one vendor in this schema). */}
+      <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+        <MultiSelect
+          label="Vendor"
+          options={vendorOpts}
+          selected={vendorIds}
+          onChange={(s) => {
+            setVendorIds(s);
+            // When vendor narrows, drop any campaigns / agents that are no
+            // longer in scope. Keeps "X selected" honest.
+            if (s.size > 0) {
+              const stillValidCamps = new Set(
+                Array.from(campaignIds).filter(id => {
+                  const c = campaigns.find(x => x.id === id);
+                  return c && s.has(c.vendor_id);
+                }),
+              );
+              setCampaignIds(stillValidCamps);
+              const stillValidAgents = new Set(
+                Array.from(agentIds).filter(id => {
+                  const a = agents.find(x => x.id === id);
+                  return a && s.has(a.vendor_id);
+                }),
+              );
+              setAgentIds(stillValidAgents);
+            }
+          }}
+          placeholderAll="All vendors"
+        />
+        <MultiSelect
+          label="Campaign"
+          options={campaignOpts}
+          selected={campaignIds}
+          onChange={setCampaignIds}
+          placeholderAll="All campaigns"
+          disabled={campaignOpts.length === 0}
+        />
+        <MultiSelect
+          label="Agent"
+          options={agentOpts}
+          selected={agentIds}
+          onChange={setAgentIds}
+          placeholderAll="All agents"
+          disabled={agentOpts.length === 0}
+        />
+        {(vendorIds.size + campaignIds.size + agentIds.size) > 0 && (
+          <button
+            type="button"
+            onClick={() => { setVendorIds(new Set()); setCampaignIds(new Set()); setAgentIds(new Set()); }}
+            className="text-[10px] text-surface-400 hover:text-brand-navy underline underline-offset-2"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
       {fileA ? (
         <div className="bg-surface-50 border border-surface-100 rounded px-2 py-2 flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -1151,9 +1289,110 @@ function DashboardSourcePanel({
         </div>
       ) : (
         <div className="text-[11px] text-surface-500 leading-relaxed">
-          Pulls deduplicated phone-level leads for the date range. The Top Priority /
-          Interested / Callback / No intent bucket is computed automatically from each
-          lead's last call.
+          Pulls deduplicated phone-level leads matching the selected filters.
+          The Top Priority / Interested / Callback / No intent bucket is computed
+          automatically from each lead's last call. Leave a filter empty to include all.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Compact multi-select dropdown — used for vendor / campaign / agent pickers.
+// Empty selection displays as `placeholderAll` and means "no filter applied"
+// (matches the backend convention where empty vendor_ids = all).
+function MultiSelect({
+  label, options, selected, onChange, placeholderAll, disabled = false,
+}: {
+  label: string;
+  options: { value: string; label: string }[];
+  selected: Set<string>;
+  onChange: (s: Set<string>) => void;
+  placeholderAll: string;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Outside-click closes the popover. Bound only while open to avoid the
+  // listener thrashing every render.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const display = selected.size === 0
+    ? placeholderAll
+    : selected.size === 1
+      ? options.find(o => selected.has(o.value))?.label ?? '1 selected'
+      : `${selected.size} selected`;
+
+  const toggle = (v: string) => {
+    const next = new Set(selected);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    onChange(next);
+  };
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen(o => !o)}
+        disabled={disabled}
+        className={`text-[11px] px-2 py-1 rounded border inline-flex items-center gap-1.5 transition-colors ${
+          disabled
+            ? 'border-surface-100 text-surface-300 cursor-not-allowed'
+            : selected.size > 0
+              ? 'border-brand-pink/40 bg-brand-pink/5 text-brand-navy'
+              : 'border-surface-200 bg-white text-surface-600 hover:border-surface-300'
+        }`}
+      >
+        <span className="text-surface-500">{label}:</span>
+        <span className={selected.size > 0 ? 'font-medium' : ''}>{display}</span>
+        <ChevronDown size={11} className={open ? 'rotate-180 transition-transform' : 'transition-transform'} />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 z-20 min-w-[220px] max-w-[320px] bg-white border border-surface-200 rounded-md shadow-lg max-h-72 overflow-hidden flex flex-col">
+          <div className="px-2 py-1.5 border-b border-surface-100 flex items-center justify-between text-[10px]">
+            <button
+              type="button"
+              onClick={() => onChange(new Set(options.map(o => o.value)))}
+              className="text-brand-pink hover:underline"
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange(new Set())}
+              className="text-surface-500 hover:text-brand-navy hover:underline"
+            >
+              Clear
+            </button>
+          </div>
+          <div className="overflow-y-auto flex-1">
+            {options.length === 0 ? (
+              <div className="px-2 py-3 text-[11px] text-surface-400 text-center">No options</div>
+            ) : (
+              options.map(o => (
+                <label
+                  key={o.value}
+                  className="flex items-center gap-2 px-2 py-1 hover:bg-surface-50 cursor-pointer text-xs"
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(o.value)}
+                    onChange={() => toggle(o.value)}
+                    className="accent-brand-pink h-3 w-3"
+                  />
+                  <span className="truncate" title={o.label}>{o.label}</span>
+                </label>
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>
