@@ -918,6 +918,9 @@ export default function LeadAttributionPage() {
                 vendorIds={vendorIds}     setVendorIds={setVendorIds}
                 campaignIds={campaignIds} setCampaignIds={setCampaignIds}
                 agentIds={agentIds}       setAgentIds={setAgentIds}
+                bucketValues={bucketValuesA}
+                bucketSel={bucketSelA}
+                setBucketSel={setBucketSelA}
               />
             ) : (
               fileA ? (
@@ -1027,6 +1030,7 @@ export default function LeadAttributionPage() {
             setCustomFilters={setFiltersA}
             columns={fileA.columns}
             hideDetectionHint={fileASource === 'dashboard'}
+            hideBucketSection={fileASource === 'dashboard'}
           />
 
           <FilterPanel
@@ -1131,6 +1135,7 @@ function DashboardSourcePanel({
   range, setRange, loading, fileA, onLoad, onClear,
   vendors, campaigns, agents,
   vendorIds, setVendorIds, campaignIds, setCampaignIds, agentIds, setAgentIds,
+  bucketValues, bucketSel, setBucketSel,
 }: {
   range: DashboardRange;
   setRange: (r: DashboardRange) => void;
@@ -1144,6 +1149,9 @@ function DashboardSourcePanel({
   vendorIds:   Set<string>; setVendorIds:   (s: Set<string>) => void;
   campaignIds: Set<string>; setCampaignIds: (s: Set<string>) => void;
   agentIds:    Set<string>; setAgentIds:    (s: Set<string>) => void;
+  bucketValues: string[];
+  bucketSel: Set<string>;
+  setBucketSel: (s: Set<string>) => void;
 }) {
   // Campaign list narrows to selected vendors if any vendor is picked, so the
   // dropdown stays scoped to what the user is actually looking at.
@@ -1266,6 +1274,23 @@ function DashboardSourcePanel({
           </button>
         )}
       </div>
+
+      {/* Bucket pills — only relevant after a fetch has run, since the bucket
+          is computed client-side from each row's interest_level / next_step.
+          Until then we can't know what values are in the data. The same state
+          drives Step 3's filter, so toggling here = toggling there. */}
+      {fileA && bucketValues.length > 0 && (
+        <div className="border-t border-surface-100 pt-2 mb-2">
+          <BucketPills
+            label="Bucket"
+            column="_bucket"
+            values={bucketValues}
+            selected={bucketSel}
+            onChange={setBucketSel}
+            hideDetectionHint
+          />
+        </div>
+      )}
 
       {fileA ? (
         <div className="bg-surface-50 border border-surface-100 rounded px-2 py-2 flex items-start justify-between gap-2">
@@ -1494,7 +1519,7 @@ function ColumnPicker({
 function FilterPanel({
   label, totalRows, filteredRows,
   bucketColumn, bucketColumnLabel = 'Bucket', bucketValues, bucketSel, setBucketSel,
-  customFilters, setCustomFilters, columns, hideDetectionHint = false,
+  customFilters, setCustomFilters, columns, hideDetectionHint = false, hideBucketSection = false,
 }: {
   label: string;
   totalRows: number;
@@ -1508,12 +1533,8 @@ function FilterPanel({
   setCustomFilters: (f: FilterRule[]) => void;
   columns: string[];
   hideDetectionHint?: boolean;
+  hideBucketSection?: boolean;
 }) {
-  const toggleBucket = (v: string) => {
-    const next = new Set(bucketSel);
-    if (next.has(v)) next.delete(v); else next.add(v);
-    setBucketSel(next);
-  };
   const addFilter = () => {
     setCustomFilters([
       ...customFilters,
@@ -1526,6 +1547,7 @@ function FilterPanel({
   const removeFilter = (id: string) => {
     setCustomFilters(customFilters.filter(f => f.id !== id));
   };
+  const showBuckets = !hideBucketSection && !!bucketColumn && bucketValues.length > 0;
   return (
     <div className="card p-3 mb-3">
       <div className="flex items-baseline justify-between mb-2">
@@ -1536,52 +1558,18 @@ function FilterPanel({
         </div>
       </div>
 
-      {bucketColumn && bucketValues.length > 0 && (
-        <div className="mb-2.5">
-          <div className="text-[10px] text-surface-500 mb-1">
-            {bucketColumnLabel}
-            {!hideDetectionHint && (
-              <span className="italic text-surface-400"> (detected from <code className="text-[9px]">{bucketColumn}</code>)</span>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-1.5 items-center">
-            {bucketValues.map(v => {
-              const on = bucketSel.has(v);
-              const isDashboard = DASHBOARD_BUCKETS.includes(v);
-              const label = isDashboard ? BUCKET_LABELS[v] : v;
-              const accent = v === 'top_priority' || v === 'success' || v === 'successful' || v === 'paid';
-              return (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => toggleBucket(v)}
-                  className={`text-[11px] px-2 py-1 rounded inline-flex items-center gap-1 transition-colors ${
-                    on
-                      ? accent
-                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                        : 'bg-brand-navy/5 text-brand-navy border border-brand-navy/20'
-                      : 'bg-surface-50 text-surface-400 border border-surface-200 hover:text-surface-700'
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    onChange={() => {}}
-                    className={`h-3 w-3 pointer-events-none ${accent ? 'accent-emerald-600' : 'accent-brand-pink'}`}
-                  />
-                  {label}
-                </button>
-              );
-            })}
-            <span className="text-[10px] text-surface-400 mx-1">·</span>
-            <button type="button" onClick={() => setBucketSel(new Set(bucketValues))} className="text-[10px] text-brand-pink hover:underline">All</button>
-            <span className="text-[10px] text-surface-300">·</span>
-            <button type="button" onClick={() => setBucketSel(new Set())} className="text-[10px] text-surface-400 hover:underline">None</button>
-          </div>
-        </div>
+      {showBuckets && (
+        <BucketPills
+          label={bucketColumnLabel}
+          column={bucketColumn!}
+          values={bucketValues}
+          selected={bucketSel}
+          onChange={setBucketSel}
+          hideDetectionHint={hideDetectionHint}
+        />
       )}
 
-      <div className={bucketColumn ? 'border-t border-surface-100 pt-2' : ''}>
+      <div className={showBuckets ? 'border-t border-surface-100 pt-2' : ''}>
         {customFilters.length > 0 && (
           <div className="text-[10px] text-surface-500 mb-1">Custom filters (AND)</div>
         )}
@@ -1601,6 +1589,71 @@ function FilterPanel({
         >
           <Plus size={11} /> Add filter
         </button>
+      </div>
+    </div>
+  );
+}
+
+// Renders the bucket / status preset pills used inside FilterPanel AND inside
+// the Dashboard source panel. Same visual treatment in both places — accent
+// color for known "positive" buckets (Top Priority, success). State is owned
+// by the parent, so toggling in either location updates the same set.
+function BucketPills({
+  label, column, values, selected, onChange, hideDetectionHint = false,
+}: {
+  label: string;
+  column: string;
+  values: string[];
+  selected: Set<string>;
+  onChange: (s: Set<string>) => void;
+  hideDetectionHint?: boolean;
+}) {
+  const toggle = (v: string) => {
+    const next = new Set(selected);
+    if (next.has(v)) next.delete(v); else next.add(v);
+    onChange(next);
+  };
+  return (
+    <div className="mb-2.5">
+      <div className="text-[10px] text-surface-500 mb-1">
+        {label}
+        {!hideDetectionHint && (
+          <span className="italic text-surface-400"> (detected from <code className="text-[9px]">{column}</code>)</span>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-1.5 items-center">
+        {values.map(v => {
+          const on = selected.has(v);
+          const isDashboard = DASHBOARD_BUCKETS.includes(v);
+          const labelText = isDashboard ? BUCKET_LABELS[v] : v;
+          const accent = v === 'top_priority' || v === 'success' || v === 'successful' || v === 'paid';
+          return (
+            <button
+              key={v}
+              type="button"
+              onClick={() => toggle(v)}
+              className={`text-[11px] px-2 py-1 rounded inline-flex items-center gap-1 transition-colors ${
+                on
+                  ? accent
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-brand-navy/5 text-brand-navy border border-brand-navy/20'
+                  : 'bg-surface-50 text-surface-400 border border-surface-200 hover:text-surface-700'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => {}}
+                className={`h-3 w-3 pointer-events-none ${accent ? 'accent-emerald-600' : 'accent-brand-pink'}`}
+              />
+              {labelText}
+            </button>
+          );
+        })}
+        <span className="text-[10px] text-surface-400 mx-1">·</span>
+        <button type="button" onClick={() => onChange(new Set(values))} className="text-[10px] text-brand-pink hover:underline">All</button>
+        <span className="text-[10px] text-surface-300">·</span>
+        <button type="button" onClick={() => onChange(new Set())} className="text-[10px] text-surface-400 hover:underline">None</button>
       </div>
     </div>
   );
