@@ -14,7 +14,7 @@ import { cn } from '@/lib/api';
 const NAV = [
   { href: '/',                label: 'Overview',          icon: LayoutDashboard },
   { href: '/hourly-insights', label: 'Hourly Insights',   icon: Clock },
-  { href: '/dod-leads',       label: 'DoD Leads',         icon: CalendarDays },
+  { href: '/dod-leads',       label: 'Leads',             icon: CalendarDays },
   { href: '/vendors',         label: 'Vendor Analysis',   icon: Users },
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/calls',           label: 'Call Logs',         icon: Phone },
