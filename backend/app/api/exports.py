@@ -201,7 +201,12 @@ async def export_calls(
         .outerjoin(Campaign, Campaign.id == CallLog.campaign_id)
         .outerjoin(Agent, Agent.id == CallLog.agent_id)
         .outerjoin(latest_per_lead, latest_per_lead.c.mobile == CallLog.mobile_number)
-        .order_by(CallLog.started_at.desc().nullslast())
+        # DISTINCT ON keeps one row per phone — the latest matching call.
+        # Without this, phones retried multiple times within the same
+        # filter window appear multiple times in the CSV, making the row
+        # count exceed the dashboard's unique-phone count.
+        .distinct(CallLog.mobile_number)
+        .order_by(CallLog.mobile_number, CallLog.started_at.desc().nullslast())
         .limit(EXPORT_ROW_CAP)
     )
     stmt = filters.apply(stmt)
