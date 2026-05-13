@@ -94,8 +94,8 @@ async def _serialize(db: AsyncSession, entry: LedgerEntry) -> LedgerEntryOut:
 
     if entry.campaign_id:
         c = (await db.execute(select(Campaign).where(Campaign.id == entry.campaign_id))).scalar_one_or_none()
-        if c:
-            campaign_name = c.name
+         if c:
+            campaign_name = c.display_name or c.name
             campaign_vendor_request_id = c.vendor_request_id
         live_stats = await _live_stats_for_campaign(db, entry.campaign_id)
 
@@ -153,6 +153,7 @@ async def pending_campaigns(
         select(
             Campaign.id,
             Campaign.name,
+            Campaign.display_name,
             Campaign.vendor_id,
             Vendor.name.label("vendor_name"),
             Campaign.vendor_request_id,
@@ -171,7 +172,7 @@ async def pending_campaigns(
             func.coalesce(Campaign.started_at, Campaign.created_at) >= cutoff
         )
         .group_by(
-            Campaign.id, Campaign.name, Campaign.vendor_id, Vendor.name,
+            Campaign.id, Campaign.name, Campaign.display_name, Campaign.vendor_id, Vendor.name,
             Campaign.vendor_request_id, Campaign.started_at, Campaign.expected_calls,
         )
         .order_by(func.coalesce(Campaign.started_at, Campaign.created_at).desc())
@@ -181,7 +182,7 @@ async def pending_campaigns(
     items = [
         PendingCampaign(
             campaign_id=r.id,
-            campaign_name=r.name,
+            campaign_name=r.display_name or r.name,
             vendor_id=r.vendor_id,
             vendor_name=r.vendor_name,
             vendor_request_id=r.vendor_request_id,
