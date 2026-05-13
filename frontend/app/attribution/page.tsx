@@ -54,10 +54,18 @@ type ColumnMappingA = { phone: string; date: string };
 type ColumnMappingB = {
   phone: string;
   date: string;
+type ColumnMappingB = {
+  phone: string;
+  date: string;
   amount?: string;
   amountPaid?: string;
-  status?: string;
+  // Display-only mappings. Shown as columns in the preview tables and
+  // appended to download CSVs. Don't affect the matching algorithm.
+  // Each entry has a user-editable label + the source column from File B.
+  extras: ExtraMapping[];
 };
+
+type ExtraMapping = { label: string; column: string };
 
 type AttributionRule = 'b_after_a' | 'any_time';
 type FileASource = 'dashboard' | 'upload';
@@ -334,21 +342,29 @@ function autoDetectB(columns: string[]): ColumnMappingB {
   };
 }
 
-// Patterns used when the user clicks "+ Amount" / "+ Paid" / "+ Status".
-// The detected column is pre-selected; user can still change via the
-// dropdown. Defined as a constant so the same patterns drive both the
-// initial auto-detect (above) and the opt-in adds.
+// Patterns used when the user clicks "+ Amount" / "+ Paid". The detected
+// column is pre-selected; user can still change via the dropdown. Defined
+// as a constant so the same patterns drive both the initial auto-detect
+// (above) and the opt-in adds. Status is no longer a "named" mapping —
+// users add a custom filter on `status` in Step 3 if they want it.
 const OPTIONAL_B_PATTERNS = {
   amount:     ['totalamount', 'total_amount', 'total', 'amount', 'order_value', 'price'],
   amountPaid: ['paidamount', 'paid_amount', 'paid', 'amount_paid'],
-  status:     ['status', 'payment_status', 'order_status', 'state'],
 } as const;
 
 type OptionalMappingB = keyof typeof OPTIONAL_B_PATTERNS;
 const OPTIONAL_B_LABELS: Record<OptionalMappingB, string> = {
   amount: 'Amount',
   amountPaid: 'Paid',
-  status: 'Status',
+};
+
+// Pre-set extra mapping patterns — purely for display. Each key is the
+// label the user sees; the values are column-name patterns we sniff on
+// file load (or when the user clicks the matching "+" pill). Add more
+// here if there's another column you want as a one-click preset.
+const EXTRA_PRESET_PATTERNS: Record<string, string[]> = {
+  Product: ['product', 'product_name', 'item_name', 'plan', 'plan_name', 'course', 'course_name', 'sku'],
+  Source:  ['source', 'utm_source', 'referrer', 'channel', 'lead_source', 'acquisition_channel'],
 };
 
 function detectCategoricalColumn(columns: string[], patterns: string[]): string | null {
@@ -585,7 +601,15 @@ function flattenPairs(pairs: MatchedPair[], mappingB: ColumnMappingB): Record<st
     out['_match_lag_days'] = p.lagDays ?? '';
     if (mappingB.amount)     out['_match_amount']      = p.b[mappingB.amount] ?? '';
     if (mappingB.amountPaid) out['_match_amount_paid'] = p.b[mappingB.amountPaid] ?? '';
-    if (mappingB.status)     out['_match_status']      = p.b[mappingB.status] ?? '';
+    // Display extras flow into the CSV too, prefixed with `_match_` and
+    // slug-cased so they don't collide with A's existing column names.
+    // Empty labels are skipped (user added the row but never typed a name).
+    for (const extra of mappingB.extras) {
+      const lbl = extra.label.trim();
+      if (!lbl || !extra.column) continue;
+      const slug = lbl.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+      out[`_match_${slug || 'extra'}`] = p.b[extra.column] ?? '';
+    }
     return out;
   });
 }
@@ -619,7 +643,7 @@ export default function LeadAttributionPage() {
 
   // Mappings
   const [mappingA, setMappingA] = useState<ColumnMappingA>({ phone: '', date: '' });
-  const [mappingB, setMappingB] = useState<ColumnMappingB>({ phone: '', date: '' });
+  const [mappingB, setMappingB] = useState<ColumnMappingB>({ phone: '', date: '', extras: [] });
 
   // Bucket / status presets
   const bucketColA = useMemo(
@@ -756,11 +780,27 @@ export default function LeadAttributionPage() {
           setFiltersA([]);
         } else {
           setFileB(data);
-          setMappingB(autoDetectB(parsed.columns));
-          // Status pills no longer render on File B — Step 3 keeps the
-          // panel symmetric with File A's (just "+ Add filter"). The
-          // selection set stays empty so passesB() doesn't apply a hidden
-          // filter; users add a custom filter on `status` if they want it.
+          // Auto-populate default mappings: phone + date (always), plus the
+          // useful presets — Amount, Paid, Product, Source. Each is only
+          // included if a matching column is found. User can remove any of
+          // these via × or add more via the "+" pills below the panel.
+          const autoAmount = findColumn(parsed.columns, [...OPTIONAL_B_PATTERNS.amount]);
+          const autoPaid   = findColumn(parsed.columns, [...OPTIONAL_B_PATTERNS.amountPaid]);
+          const autoExtras: ExtraMapping[] = [];
+          for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS)) {
+            const found = findColumn(parsed.columns, patterns);
+            if (found) autoExtras.push({ label, column: found });
+          }
+          setMappingB({
+            phone: autoDetectB(parsed.columns).phone,
+            date:  autoDetectB(parsed.columns).date,
+            amount: autoAmount,
+            amountPaid: autoPaid,
+            extras: autoExtras,
+          });
+          // No special status filter — Step 3's File B panel is symmetric
+          // with File A's (just "+ Add filter"). Users add a custom filter
+          // on `status` (or any other column) if they want it.
           setStatusSelB(new Set());
           setFiltersB([]);
         }
@@ -777,7 +817,7 @@ export default function LeadAttributionPage() {
       setFileA(null); setMappingA({ phone: '', date: '' });
       setBucketSelA(new Set()); setFiltersA([]);
     } else {
-      setFileB(null); setMappingB({ phone: '', date: '' });
+      setFileB(null); setMappingB({ phone: '', date: '', extras: [] });
       setStatusSelB(new Set()); setFiltersB([]);
     }
     setResults(null);
@@ -786,7 +826,7 @@ export default function LeadAttributionPage() {
   const resetAll = () => {
     setFileA(null); setFileB(null);
     setMappingA({ phone: '', date: '' });
-    setMappingB({ phone: '', date: '' });
+    setMappingB({ phone: '', date: '', extras: [] });
     setBucketSelA(new Set()); setStatusSelB(new Set());
     setFiltersA([]); setFiltersB([]);
     setResults(null); setParseError(null);
@@ -989,15 +1029,11 @@ export default function LeadAttributionPage() {
             </div>
             <div className="card p-3 space-y-2">
               <div className="text-[11px] uppercase tracking-wider text-surface-500">File B</div>
-              <ColumnPicker label="Phone"  columns={fileB.columns} value={mappingB.phone} onChange={v => setMappingB(m => ({ ...m, phone: v }))} />
-              <ColumnPicker label="Date"   columns={fileB.columns} value={mappingB.date}  onChange={v => setMappingB(m => ({ ...m, date: v  }))} />
+              <ColumnPicker label="Phone" columns={fileB.columns} value={mappingB.phone} onChange={v => setMappingB(m => ({ ...m, phone: v }))} />
+              <ColumnPicker label="Date"  columns={fileB.columns} value={mappingB.date}  onChange={v => setMappingB(m => ({ ...m, date: v  }))} />
 
-              {/* Optional mappings — only rendered if the user opted in via
-                  the "+ Add" pills below. Each shows the same picker UI
-                  plus an × to remove. Amount / Paid drive the revenue
-                  KPI; Status is referenced by the bucket-aware downloads
-                  and the preview table. */}
-              {(['amount', 'amountPaid', 'status'] as OptionalMappingB[]).map(key => {
+              {/* Algorithm-relevant optional mappings (drive revenue KPIs). */}
+              {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
                 if (mappingB[key] === undefined) return null;
                 return (
                   <ColumnPicker
@@ -1011,30 +1047,72 @@ export default function LeadAttributionPage() {
                 );
               })}
 
-              {/* "+ Add" pills for unmapped optional fields. Clicking adds
-                  the picker above, pre-populated with the auto-detected
-                  column for that pattern (falls back to first column). */}
-              {(['amount', 'amountPaid', 'status'] as OptionalMappingB[]).some(k => mappingB[k] === undefined) && (
-                <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
-                  <span className="text-[10px] text-surface-400 self-center">Optional:</span>
-                  {(['amount', 'amountPaid', 'status'] as OptionalMappingB[]).map(key => {
-                    if (mappingB[key] !== undefined) return null;
-                    return (
-                      <button
-                        key={key}
-                        type="button"
-                        onClick={() => {
-                          const detected = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS[key]]);
-                          setMappingB(m => ({ ...m, [key]: detected ?? fileB.columns[0] ?? '' }));
-                        }}
-                        className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
-                      >
-                        <Plus size={10} /> {OPTIONAL_B_LABELS[key]}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
+              {/* Display-only extras — Product, Source, or any custom column
+                  the user wants visible in the preview / download. The label
+                  is editable inline so users can name it whatever they want. */}
+              {mappingB.extras.map((extra, idx) => (
+                <ExtraMappingRow
+                  key={idx}
+                  extra={extra}
+                  columns={fileB.columns}
+                  onChangeLabel={(label) =>
+                    setMappingB(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, label } : e) }))
+                  }
+                  onChangeColumn={(column) =>
+                    setMappingB(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, column } : e) }))
+                  }
+                  onRemove={() =>
+                    setMappingB(m => ({ ...m, extras: m.extras.filter((_, i) => i !== idx) }))
+                  }
+                />
+              ))}
+
+              {/* Add pills — preset shortcuts plus "+ Custom" for anything else. */}
+              <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
+                <span className="text-[10px] text-surface-400 self-center">Add:</span>
+                {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
+                  if (mappingB[key] !== undefined) return null;
+                  return (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => {
+                        const detected = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS[key]]);
+                        setMappingB(m => ({ ...m, [key]: detected ?? fileB.columns[0] ?? '' }));
+                      }}
+                      className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
+                    >
+                      <Plus size={10} /> {OPTIONAL_B_LABELS[key]}
+                    </button>
+                  );
+                })}
+                {Object.entries(EXTRA_PRESET_PATTERNS).map(([label, patterns]) => {
+                  // Skip if an extra row with this exact label already exists
+                  if (mappingB.extras.some(e => e.label === label)) return null;
+                  return (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => {
+                        const detected = findColumn(fileB.columns, patterns) ?? fileB.columns[0] ?? '';
+                        setMappingB(m => ({ ...m, extras: [...m.extras, { label, column: detected }] }));
+                      }}
+                      className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
+                    >
+                      <Plus size={10} /> {label}
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMappingB(m => ({ ...m, extras: [...m.extras, { label: '', column: fileB.columns[0] ?? '' }] }));
+                  }}
+                  className="text-[10px] px-2 py-0.5 rounded border border-dashed border-brand-pink/40 text-brand-pink hover:bg-brand-pink/5 inline-flex items-center gap-1"
+                >
+                  <Plus size={10} /> Custom
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -1586,6 +1664,47 @@ function ColumnPicker({
   );
 }
 
+// Display-only mapping row with an editable label + column picker. Lives
+// only in mappingB.extras — never used for matching or revenue. The label
+// becomes a column header in the results preview and a column header in
+// the downloaded CSV (prefixed with `_match_`).
+function ExtraMappingRow({
+  extra, columns, onChangeLabel, onChangeColumn, onRemove,
+}: {
+  extra: ExtraMapping;
+  columns: string[];
+  onChangeLabel: (v: string) => void;
+  onChangeColumn: (v: string) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      <input
+        type="text"
+        value={extra.label}
+        onChange={e => onChangeLabel(e.target.value)}
+        placeholder="Label"
+        className="w-14 shrink-0 text-xs px-1 py-1 border-b border-surface-200 bg-transparent focus:outline-none focus:border-brand-pink"
+      />
+      <select
+        value={extra.column}
+        onChange={e => onChangeColumn(e.target.value)}
+        className="flex-1 text-xs px-2 py-1 border border-surface-200 rounded bg-white text-brand-navy hover:border-surface-300 focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
+      >
+        {columns.map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="text-surface-400 hover:text-red-600 p-0.5 shrink-0"
+        aria-label={`Remove ${extra.label || 'custom'} mapping`}
+      >
+        <X size={11} />
+      </button>
+    </div>
+  );
+}
+
 function FilterPanel({
   label, totalRows, filteredRows,
   bucketColumn, bucketColumnLabel = 'Bucket', bucketValues, bucketSel, setBucketSel,
@@ -1982,7 +2101,10 @@ function ResultDetailSection({
                 {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">B date</th>}
                 {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">Lag</th>}
                 {!isUnmatched && mappingB.amount && <th className="text-right py-2 px-3 whitespace-nowrap">Amount</th>}
-                {!isUnmatched && mappingB.status && <th className="text-left py-2 px-3 whitespace-nowrap">Status</th>}
+                {!isUnmatched && mappingB.amountPaid && <th className="text-right py-2 px-3 whitespace-nowrap">Paid</th>}
+                {!isUnmatched && mappingB.extras.map((e, i) => (
+                  <th key={`h-${i}`} className="text-left py-2 px-3 whitespace-nowrap">{e.label || '—'}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
@@ -1996,7 +2118,8 @@ function ResultDetailSection({
                 const bucket = aRow._bucket;
                 const amountStr = bRow && mappingB.amount ? (bRow[mappingB.amount] ?? '') : '';
                 const amountNum = parseFloat(amountStr);
-                const statusStr = bRow && mappingB.status ? (bRow[mappingB.status] ?? '') : '';
+                const paidStr   = bRow && mappingB.amountPaid ? (bRow[mappingB.amountPaid] ?? '') : '';
+                const paidNum   = parseFloat(paidStr);
                 return (
                   <tr key={i} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
                     <td className="py-2 px-3 tabular-nums text-surface-700 whitespace-nowrap">
@@ -2036,11 +2159,24 @@ function ResultDetailSection({
                           : (amountStr || <span className="text-surface-300">—</span>)}
                       </td>
                     )}
-                    {!isUnmatched && mappingB.status && (
-                      <td className="py-2 px-3 text-surface-700">
-                        {statusStr || <span className="text-surface-300">—</span>}
+                    {!isUnmatched && mappingB.amountPaid && (
+                      <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                        {!Number.isNaN(paidNum) && paidStr !== ''
+                          ? fmtINR(paidNum)
+                          : (paidStr || <span className="text-surface-300">—</span>)}
                       </td>
                     )}
+                    {/* Display extras — Product, Source, or any custom column
+                        the user added. Truncated visually with overflow-hidden
+                        so a long URL or paragraph doesn't blow out the row. */}
+                    {!isUnmatched && mappingB.extras.map((e, ix) => {
+                      const val = bRow ? (bRow[e.column] ?? '') : '';
+                      return (
+                        <td key={`c-${i}-${ix}`} className="py-2 px-3 text-surface-700 max-w-[140px] truncate" title={val}>
+                          {val || <span className="text-surface-300">—</span>}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })}
