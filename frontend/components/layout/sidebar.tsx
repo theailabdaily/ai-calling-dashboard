@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText, CalendarDays, Search } from 'lucide-react';
+import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText, CalendarDays, Search, Shuffle } from 'lucide-react';
 import { cn } from '@/lib/api';
 
 const NAV = [
@@ -15,6 +15,9 @@ const NAV = [
   { href: '/agents',          label: 'Agent Performance', icon: Bot },
   { href: '/campaigns/new',   label: 'Launch Campaign',   icon: Send },
   { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
+  { href: '/attribution',     label: 'Lead Attribution',  icon: Shuffle },
+];
+  
 ];
 
 // Desktop sidebar. Hidden on viewports below lg (1024px) — those use MobileNav.
