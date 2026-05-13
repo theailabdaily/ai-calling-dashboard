@@ -1,23 +1,36 @@
-"""DoD (Day-over-Day) Leads — campaigns grouped by their upload date with
-sales-action bucket counts. Powers the DoD Leads sidebar page.
+"""DoD Leads — leads grouped by FINAL LEAD STATUS DATE.
 
-The grouping is by `vendor_created_at` (the time the lead was uploaded to
-the vendor), bucketed to a calendar date in IST. Each row represents one
-day's worth of leads, with an embedded per-campaign breakdown.
+Each phone is collapsed to a single row whose date is the calendar day of
+its most recent call activity in IST:
+
+    final_at = MAX(COALESCE(ended_at, vendor_created_at)) over all the
+               phone's call_logs rows
+
+For a connected call this is the moment the call ended; for a still-
+pending lead it falls back to vendor_created_at (the upload time) so
+unreached leads still surface on a date.
+
+This replaces the v1 grouping by `vendor_created_at` (upload date). The
+new semantics answer the BD-relevant question — "which leads reached
+their final status today" — rather than the operational question "which
+leads were uploaded today".
 
 Counts are unique-phone counts within each grouping level:
-- Day-level total = distinct phones uploaded that day
-- Campaign-level total = distinct phones in that campaign
-When a phone appears in multiple same-day campaigns, the sum of
-campaign-level totals will exceed the day-level total — that's correct,
-not a bug.
+- Day-level total = distinct phones whose final status fell on that day
+- Campaign-level total = distinct phones in that campaign whose final
+  status within that campaign fell on that day
+
+A phone in two campaigns can appear on different days at the campaign
+level (each campaign computes its own final_at). Day-level total may not
+equal the sum of campaign-level totals on the same day — that's
+correct, not a bug.
 """
 from __future__ import annotations
 
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -35,58 +48,61 @@ _wants_callback = func.upper(CallLog.result["next_step_interest"].astext) == "CA
 
 
 def _phone_level_subquery(group_by_campaign: bool):
-    """Build the per-phone aggregation that flattens multiple call_logs rows
-    for the same phone into a single row of bool_or signals.
+    """Per-phone aggregation that flattens multiple call_logs rows for the
+    same phone into a single row with bool_or signals + final timestamp.
 
-    When `group_by_campaign=True`, group by (mobile_number, campaign_id) so
-    a phone in two campaigns becomes two rows — one per campaign. When
-    `group_by_campaign=False`, group by (mobile_number, upload_day) so the
-    same phone in two same-day campaigns becomes one row at the day level.
+    `final_at` is MAX(COALESCE(ended_at, vendor_created_at)) — the latest
+    moment in the phone's lifecycle. ended_at is preferred because it
+    represents call completion; vendor_created_at is the fallback for
+    rows that never reached an end (still ringing, scheduled, etc.).
+
+    When `group_by_campaign=True`, group by (mobile_number, campaign_id)
+    so a phone in two campaigns becomes two rows — one per campaign,
+    each with its own final_at within that campaign. When False, group
+    by mobile_number only — one row per phone with the globally latest
+    timestamp.
     """
-    # IST calendar date of the upload time. Stored as timestamptz so the
-    # AT TIME ZONE produces a `timestamp without time zone` in IST, which
-    # we then DATE-truncate to a calendar day.
-    day_ist = func.date(func.timezone("Asia/Kolkata", CallLog.vendor_created_at)).label("day_ist")
+    final_at = func.coalesce(CallLog.ended_at, CallLog.vendor_created_at)
 
     cols = [
         CallLog.mobile_number.label("phone"),
-        day_ist,
+        func.max(final_at).label("final_at"),
         func.bool_or(_is_connected).label("connected"),
         func.bool_or(and_(_is_connected, _is_interested)).label("interested"),
         func.bool_or(and_(_is_connected, _wants_callback)).label("callback"),
     ]
+    group_cols = [CallLog.mobile_number]
     if group_by_campaign:
         cols.append(CallLog.campaign_id.label("campaign_id"))
+        group_cols.append(CallLog.campaign_id)
 
     stmt = (
         select(*cols)
         .where(and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
-        .group_by(
-            CallLog.mobile_number,
-            day_ist,
-            *([CallLog.campaign_id] if group_by_campaign else []),
-        )
+        .group_by(*group_cols)
     )
     return stmt.subquery()
 
 
 @router.get("", response_model=DodLeadsResponse)
 async def get_dod_leads(db: AsyncSession = Depends(get_db)):
-    """Return all upload-days with campaign breakdown, newest first.
+    """Return all final-status-days with campaign breakdown, newest first.
 
-    No filters in v1 — the table is small (one row per upload day, typically
-    < 100 rows even after a year of operation). If we later need date-window
-    or vendor scoping, plug it in via Depends(parse_filters) at the router.
+    No query params in v1 — the table is small (one row per status day,
+    typically < 100 rows even after a year of operation). The frontend
+    applies date-range filtering client-side. If we later need backend
+    date scoping, plug it in via Depends(parse_filters) at the router.
     """
     # ---- Day-level aggregation ----
     pl_day = _phone_level_subquery(group_by_campaign=False)
+    day_ist = func.date(func.timezone("Asia/Kolkata", pl_day.c.final_at)).label("day_ist")
 
-    # Counters: for each phone-day row, classify into exactly one bucket.
-    # The buckets are mutually exclusive among connected leads. Unreached
-    # leads (NOT connected) get their own bucket so the row math reconciles.
+    # For each phone, classify into exactly one bucket. The buckets are
+    # mutually exclusive among connected leads. Unreached leads (NOT
+    # connected) get their own bucket so the row math reconciles.
     day_stmt = (
         select(
-            pl_day.c.day_ist,
+            day_ist,
             func.count().label("total_leads"),
             func.count().filter(and_(pl_day.c.connected, pl_day.c.interested, pl_day.c.callback))
                 .label("top_priority"),
@@ -98,20 +114,22 @@ async def get_dod_leads(db: AsyncSession = Depends(get_db)):
                 .label("no_intent"),
             func.count().filter(~pl_day.c.connected).label("unreached"),
         )
-        .group_by(pl_day.c.day_ist)
-        .order_by(pl_day.c.day_ist.desc())
+        .group_by(day_ist)
+        .order_by(day_ist.desc())
     )
     day_rows = (await db.execute(day_stmt)).all()
 
     # ---- Campaign-level aggregation ----
     # Same shape but grouped also by campaign_id, then joined to campaigns
-    # for the human-readable name. We build the per-campaign aggregation
-    # first as a subquery, then join campaigns on top.
+    # for the human-readable name. Display_name preferred over raw name —
+    # display_name is the user-facing label (synced from Hunar's UI),
+    # name is the underlying request id.
     pl_camp = _phone_level_subquery(group_by_campaign=True)
+    camp_day_ist = func.date(func.timezone("Asia/Kolkata", pl_camp.c.final_at)).label("day_ist")
 
     camp_agg = (
         select(
-            pl_camp.c.day_ist,
+            camp_day_ist,
             pl_camp.c.campaign_id,
             func.count().label("total_leads"),
             func.count().filter(and_(pl_camp.c.connected, pl_camp.c.interested, pl_camp.c.callback))
@@ -124,14 +142,16 @@ async def get_dod_leads(db: AsyncSession = Depends(get_db)):
                 .label("no_intent"),
             func.count().filter(~pl_camp.c.connected).label("unreached"),
         )
-        .group_by(pl_camp.c.day_ist, pl_camp.c.campaign_id)
+        .group_by(camp_day_ist, pl_camp.c.campaign_id)
     ).subquery()
+
+    camp_name = func.coalesce(Campaign.display_name, Campaign.name).label("campaign_name")
 
     camp_stmt = (
         select(
             camp_agg.c.day_ist,
             camp_agg.c.campaign_id,
-            Campaign.name.label("campaign_name"),
+            camp_name,
             camp_agg.c.total_leads,
             camp_agg.c.top_priority,
             camp_agg.c.interested_only,
@@ -140,7 +160,7 @@ async def get_dod_leads(db: AsyncSession = Depends(get_db)):
             camp_agg.c.unreached,
         )
         .join(Campaign, Campaign.id == camp_agg.c.campaign_id, isouter=True)
-        .order_by(camp_agg.c.day_ist.desc(), Campaign.name)
+        .order_by(camp_agg.c.day_ist.desc(), camp_name)
     )
     camp_rows = (await db.execute(camp_stmt)).all()
 
