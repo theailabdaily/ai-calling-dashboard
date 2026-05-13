@@ -2,23 +2,29 @@
 import { useCallback, useMemo, useState } from 'react';
 import {
   Upload, X, Plus, Download, Play, ChevronRight,
-  RotateCcw, Shuffle, FileSpreadsheet, AlertCircle,
+  RotateCcw, Shuffle, FileSpreadsheet, AlertCircle, Database, Loader2,
 } from 'lucide-react';
+import { api } from '@/lib/api';
+import type { Filters } from '@/types';
 
 // =============================================================================
-// Lead Attribution — client-side CSV matching tool
+// Lead Attribution — match dashboard leads against an external outcome CSV
 // =============================================================================
-// Upload two CSVs:
-//   File A = events/leads (e.g. dashboard export from /dod-leads or /calls)
-//   File B = outcomes/payments (e.g. CRM transaction export)
-// The tool:
-//   1. Detects columns + bucket/status presets automatically
-//   2. Lets the user filter both files (preset pills + custom column filters)
-//   3. Matches by normalized phone, applying a time-based attribution rule
-//   4. Reports a funnel: total → key-matched → pre-existing → attributed
-//   5. Exports matched / pre-existing / unmatched as separate CSVs
+// File A = leads
+//   Default mode: fetched from this dashboard's own /api/export/calls.csv
+//   (DISTINCT ON mobile_number — one row per phone, latest call kept).
+//   Bucket column is computed client-side from interest_level + next_step_interest
+//   + lifecycle_status + answered_by — same logic the Leads page uses.
 //
-// Everything runs in-browser — no upload to server, no API endpoint.
+//   Alternative mode: user uploads a CSV. Falls back to column auto-detection
+//   and whatever bucket-like column exists in the file.
+//
+// File B = outcomes / payments
+//   Always uploaded by the user (no internal source for this).
+//
+// Matching: normalize phones, then for each A row find the earliest B row
+// satisfying the time rule. Pre-existing = B exists but only before A.
+// Attributed = B exists with a date after A (or same day if toggle is on).
 // =============================================================================
 
 // ---- Types -----------------------------------------------------------------
@@ -47,12 +53,14 @@ type ColumnMappingA = { phone: string; date: string };
 type ColumnMappingB = {
   phone: string;
   date: string;
-  amount?: string;       // primary amount (typically totalAmount)
-  amountPaid?: string;   // secondary (paidAmount) — auto-detected if present
+  amount?: string;
+  amountPaid?: string;
   status?: string;
 };
 
 type AttributionRule = 'b_after_a' | 'any_time';
+type FileASource = 'dashboard' | 'upload';
+type DashboardRange = 'last_7' | 'last_30' | 'last_90' | 'last_180' | 'all_time';
 
 type MatchedPair = {
   a: Record<string, string>;
@@ -63,29 +71,26 @@ type MatchedPair = {
 };
 
 type Results = {
-  // Counts
   totalA: number;
   keyMatched: number;
   preExisting: number;
   attributed: number;
   attributedSuccess: number;
   unmatched: number;
-  // Revenue
   revenueTotal: number;
   revenuePaid: number;
-  // Row sets (for CSV download)
   attributedPairs: MatchedPair[];
   preExistingPairs: MatchedPair[];
   unmatchedRows: Record<string, string>[];
-  // Echo of inputs (for "filters changed" detection)
   ranAt: number;
 };
 
 // ---- Constants -------------------------------------------------------------
 
-// Dashboard-export bucket values. When File A's bucket column matches these
-// exactly, we apply the same "actionable three" default selection as the
-// Leads page. For arbitrary CSVs we default to all-on.
+// Dashboard bucket vocabulary. The synthetic `_bucket` column we compute on
+// dashboard-fetched rows uses these exact values. For uploaded files we also
+// recognise these (so a CSV that already has top_priority/etc. picks up the
+// same labels and default selection).
 const DASHBOARD_BUCKETS = ['top_priority', 'interested_only', 'callback_only', 'no_intent', 'unreached'];
 const DEFAULT_ON_BUCKETS = ['top_priority', 'interested_only', 'callback_only'];
 
@@ -97,24 +102,30 @@ const BUCKET_LABELS: Record<string, string> = {
   unreached:       'Unreached',
 };
 
-const OPERATOR_LABELS: Record<FilterOperator, string> = {
-  equals:        'equals',
-  not_equals:    'not equals',
-  contains:      'contains',
-  not_contains:  'does not contain',
-  gt:            'greater than',
-  lt:            'less than',
-  between:       'between',
-  empty:         'is empty',
-  not_empty:     'is not empty',
+// Display order — pills appear in this order regardless of how unique() sees them
+const BUCKET_ORDER: Record<string, number> = {
+  top_priority: 0, interested_only: 1, callback_only: 2, no_intent: 3, unreached: 4,
 };
+
+const OPERATOR_LABELS: Record<FilterOperator, string> = {
+  equals: 'equals', not_equals: 'not equals',
+  contains: 'contains', not_contains: 'does not contain',
+  gt: 'greater than', lt: 'less than', between: 'between',
+  empty: 'is empty', not_empty: 'is not empty',
+};
+
+const RANGE_OPTIONS: { key: DashboardRange; label: string; days: number | null }[] = [
+  { key: 'last_7',   label: 'Last 7 days',   days: 7    },
+  { key: 'last_30',  label: 'Last 30 days',  days: 30   },
+  { key: 'last_90',  label: 'Last 90 days',  days: 90   },
+  { key: 'last_180', label: 'Last 180 days', days: 180  },
+  { key: 'all_time', label: 'All time',      days: null },
+];
 
 // ---- CSV parser (state machine, RFC 4180-ish) ------------------------------
 
 function parseCSV(text: string): { columns: string[]; rows: Record<string, string>[] } {
-  // Strip BOM
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  // Normalize line endings
   text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
   const rows: string[][] = [];
@@ -142,19 +153,16 @@ function parseCSV(text: string): { columns: string[]; rows: Record<string, strin
       field += ch; i++;
     }
   }
-  // Flush last field/row
   if (field.length > 0 || row.length > 0) {
     row.push(field);
     rows.push(row);
   }
 
   if (rows.length === 0) return { columns: [], rows: [] };
-
   const columns = rows[0].map(c => c.trim());
   const dataRows: Record<string, string>[] = [];
   for (let r = 1; r < rows.length; r++) {
     const raw = rows[r];
-    // Skip fully-empty trailing rows
     if (raw.length === 1 && raw[0] === '') continue;
     const obj: Record<string, string> = {};
     for (let c = 0; c < columns.length; c++) {
@@ -165,68 +173,74 @@ function parseCSV(text: string): { columns: string[]; rows: Record<string, strin
   return { columns, rows: dataRows };
 }
 
+// ---- Bucket computation (matches the backend's classification) -------------
+
+// Same logic the Leads page uses:
+// - Unreached: NOT connected (lifecycle != COMPLETED or answered_by != HUMAN)
+// - Top Priority: connected + interest in (HIGH, MEDIUM) + next_step = CALLBACK
+// - Interested only: connected + interest in (HIGH, MEDIUM) + next_step != CALLBACK
+// - Callback only: connected + interest NOT in (HIGH, MEDIUM) + next_step = CALLBACK
+// - No intent: connected + neither interested nor callback
+function computeBucket(row: Record<string, string>): string {
+  const lifecycle  = (row.lifecycle_status || '').toUpperCase();
+  const answeredBy = (row.answered_by || '').toUpperCase();
+  const interest   = (row.interest_level || '').toUpperCase();
+  const callback   = (row.next_step_interest || '').toUpperCase();
+
+  const connected = lifecycle === 'COMPLETED' && answeredBy === 'HUMAN';
+  if (!connected) return 'unreached';
+
+  const interested = interest === 'HIGH' || interest === 'MEDIUM';
+  const wantsCallback = callback === 'CALLBACK';
+
+  if (interested && wantsCallback) return 'top_priority';
+  if (interested) return 'interested_only';
+  if (wantsCallback) return 'callback_only';
+  return 'no_intent';
+}
+
 // ---- Phone normalization (Indian focus) ------------------------------------
 
 function normalizePhone(raw: string): string {
   if (!raw) return '';
   const digits = raw.replace(/\D/g, '');
-  // 12 digits starting with 91 → drop country code
   if (digits.length === 12 && digits.startsWith('91')) {
     const tail = digits.slice(2);
     if (/^[6-9]/.test(tail)) return tail;
   }
-  // 11 digits starting with 0 → drop leading 0
   if (digits.length === 11 && digits.startsWith('0')) {
     const tail = digits.slice(1);
     if (/^[6-9]/.test(tail)) return tail;
   }
-  // Already 10 digits and starts with valid prefix
   if (digits.length === 10 && /^[6-9]/.test(digits)) return digits;
-  // Longer than 10 — last 10 if valid prefix
   if (digits.length > 10) {
     const tail = digits.slice(-10);
     if (/^[6-9]/.test(tail)) return tail;
   }
-  // Fallback — raw digits (lets non-Indian numbers still match against themselves)
   return digits;
 }
 
 // ---- Date parsing ----------------------------------------------------------
 
-// Returns YYYY-MM-DD or null. Handles ISO, DD/MM/YYYY (Indian default),
-// MM/DD/YYYY (US), and falls back to Date() parsing for other formats.
 function parseDate(raw: string): string | null {
   if (!raw) return null;
   const s = raw.trim();
   if (!s) return null;
-
-  // ISO: YYYY-MM-DD at start (with or without time suffix)
   const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (iso) {
     const [, y, m, d] = iso;
     return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
   }
-
-  // DD/MM/YYYY or DD-MM-YYYY (with optional time)
   const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
   if (dmy) {
     let [, a, b, y] = dmy;
     if (y.length === 2) y = '20' + y;
     const an = parseInt(a, 10);
     const bn = parseInt(b, 10);
-    // Day-month disambiguation. If first part > 12, definitely DD/MM. If
-    // second > 12, definitely MM/DD. Otherwise default to DD/MM (Indian
-    // convention is what this dashboard expects).
-    if (an > 12 && bn <= 12) {
-      return `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
-    }
-    if (bn > 12 && an <= 12) {
-      return `${y}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
-    }
+    if (an > 12 && bn <= 12) return `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
+    if (bn > 12 && an <= 12) return `${y}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`;
     return `${y}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`;
   }
-
-  // Last resort
   const d = new Date(s);
   if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
   return null;
@@ -238,6 +252,18 @@ function daysBetween(aIso: string | null, bIso: string | null): number | null {
   const b = new Date(`${bIso}T00:00:00Z`).getTime();
   if (Number.isNaN(a) || Number.isNaN(b)) return null;
   return Math.round((b - a) / (1000 * 60 * 60 * 24));
+}
+
+function todayIST(): string {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (5.5 * 60 - now.getTimezoneOffset()) * 60_000);
+  return ist.toISOString().slice(0, 10);
+}
+
+function isoMinusDays(isoDate: string, n: number): string {
+  const d = new Date(`${isoDate}T00:00:00+05:30`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
 }
 
 // ---- Filters ---------------------------------------------------------------
@@ -279,12 +305,10 @@ function passesAllFilters(row: Record<string, string>, rules: FilterRule[]): boo
 
 function findColumn(columns: string[], patterns: string[]): string | undefined {
   const lower = columns.map(c => c.toLowerCase());
-  // Exact match first
   for (const p of patterns) {
     const i = lower.indexOf(p);
     if (i >= 0) return columns[i];
   }
-  // Substring match
   for (const p of patterns) {
     const i = lower.findIndex(c => c.includes(p));
     if (i >= 0) return columns[i];
@@ -321,7 +345,7 @@ function detectCategoricalColumn(columns: string[], patterns: string[]): string 
   return null;
 }
 
-const BUCKET_COL_PATTERNS  = ['funnel_stage', 'bucket', 'lead_category', 'final_lead_status', 'category', 'tag'];
+const BUCKET_COL_PATTERNS  = ['_bucket', 'funnel_stage', 'bucket', 'lead_category', 'final_lead_status', 'category', 'tag'];
 const STATUS_COL_PATTERNS  = ['status', 'payment_status', 'order_status', 'state'];
 
 function uniqueValues(rows: Record<string, string>[], column: string, limit = 50): string[] {
@@ -331,21 +355,26 @@ function uniqueValues(rows: Record<string, string>[], column: string, limit = 50
     if (v) set.add(v);
     if (set.size >= limit) break;
   }
-  return Array.from(set).sort();
+  const values = Array.from(set);
+  // Sort dashboard buckets in display order; everything else alphabetically
+  values.sort((a, b) => {
+    const oa = BUCKET_ORDER[a];
+    const ob = BUCKET_ORDER[b];
+    if (oa !== undefined && ob !== undefined) return oa - ob;
+    if (oa !== undefined) return -1;
+    if (ob !== undefined) return 1;
+    return a.localeCompare(b);
+  });
+  return values;
 }
 
 function defaultBucketSelection(values: string[]): Set<string> {
-  // If all detected values are from the dashboard's known bucket set, default
-  // to the "actionable three" — matches the Leads page default state. For any
-  // other column shape, default to all-on (user narrows from there).
   const isDashboard = values.every(v => DASHBOARD_BUCKETS.includes(v));
-  if (isDashboard) {
-    return new Set(values.filter(v => DEFAULT_ON_BUCKETS.includes(v)));
-  }
+  if (isDashboard) return new Set(values.filter(v => DEFAULT_ON_BUCKETS.includes(v)));
   return new Set(values);
 }
 
-// ---- Currency format (Indian) ----------------------------------------------
+// ---- Currency / number format ----------------------------------------------
 
 function fmtINR(n: number): string {
   if (!Number.isFinite(n) || n === 0) return '₹0';
@@ -354,11 +383,7 @@ function fmtINR(n: number): string {
   if (n >= 1000)     return `₹${(n / 1000).toFixed(0)}K`;
   return `₹${Math.round(n).toLocaleString('en-IN')}`;
 }
-
-function fmtInt(n: number): string {
-  return n.toLocaleString('en-IN');
-}
-
+function fmtInt(n: number): string { return n.toLocaleString('en-IN'); }
 function fmtPct(num: number, denom: number): string {
   if (denom === 0) return '—';
   return `${((num / denom) * 100).toFixed(1)}%`;
@@ -389,8 +414,6 @@ function runAttribution(input: RunInput): Results {
     rule, countSameDay,
   } = input;
 
-  // Combine preset filters (bucket / status) with custom filters by mapping
-  // preset selection sets into a synthetic filter rule we evaluate inline.
   const passesA = (row: Record<string, string>): boolean => {
     if (bucketColA && bucketSelA.size > 0) {
       const v = (row[bucketColA] ?? '').trim();
@@ -409,8 +432,6 @@ function runAttribution(input: RunInput): Results {
   const filteredA = fileA.rows.filter(passesA);
   const filteredB = fileB.rows.filter(passesB);
 
-  // Index B by normalized phone. Each value is a list of B rows enriched
-  // with parsed bDate so we can pick the earliest qualifying one per A row.
   type IndexedB = {
     row: Record<string, string>;
     bDateIso: string | null;
@@ -427,8 +448,7 @@ function runAttribution(input: RunInput): Results {
 
   const bIndex = new Map<string, IndexedB[]>();
   for (const row of filteredB) {
-    const phoneRaw = row[mappingB.phone] ?? '';
-    const phone = normalizePhone(phoneRaw);
+    const phone = normalizePhone(row[mappingB.phone] ?? '');
     if (!phone) continue;
     const entry: IndexedB = {
       row,
@@ -440,12 +460,10 @@ function runAttribution(input: RunInput): Results {
     if (!bIndex.has(phone)) bIndex.set(phone, []);
     bIndex.get(phone)!.push(entry);
   }
-  // Sort each phone's B rows by date ascending — earliest first.
   bIndex.forEach(list => {
     list.sort((x, y) => (x.bDateIso ?? '\uffff').localeCompare(y.bDateIso ?? '\uffff'));
   });
 
-  // Walk A; classify each row.
   const attributedPairs: MatchedPair[] = [];
   const preExistingPairs: MatchedPair[] = [];
   const unmatchedRows: Record<string, string>[] = [];
@@ -465,41 +483,30 @@ function runAttribution(input: RunInput): Results {
       continue;
     }
 
-    // Find first B that satisfies the attribution rule.
     let matched: IndexedB | null = null;
     let earliestBefore: IndexedB | null = null;
     for (const b of candidates) {
-      if (rule === 'any_time') {
-        matched = b; break;
-      }
-      // rule === 'b_after_a'
+      if (rule === 'any_time') { matched = b; break; }
       if (!aDateIso || !b.bDateIso) continue;
       if (b.bDateIso > aDateIso) { matched = b; break; }
       if (b.bDateIso === aDateIso && countSameDay) { matched = b; break; }
-      // Record the earliest before-A match (for pre-existing classification)
       if (!earliestBefore) earliestBefore = b;
     }
 
     if (matched) {
-      const pair: MatchedPair = {
-        a: aRow,
-        b: matched.row,
-        bDateIso: matched.bDateIso,
-        aDateIso,
+      attributedPairs.push({
+        a: aRow, b: matched.row,
+        bDateIso: matched.bDateIso, aDateIso,
         lagDays: daysBetween(aDateIso, matched.bDateIso),
-      };
-      attributedPairs.push(pair);
+      });
       revenueTotal += matched.amount;
       revenuePaid  += matched.amountPaid;
       if (matched.statusIsSuccess) attributedSuccess++;
     } else if (earliestBefore || candidates.length > 0) {
-      // Phone exists in B but no time-valid match → pre-existing customer
       const b = earliestBefore ?? candidates[0];
       preExistingPairs.push({
-        a: aRow,
-        b: b.row,
-        bDateIso: b.bDateIso,
-        aDateIso,
+        a: aRow, b: b.row,
+        bDateIso: b.bDateIso, aDateIso,
         lagDays: daysBetween(aDateIso, b.bDateIso),
       });
     } else {
@@ -514,11 +521,8 @@ function runAttribution(input: RunInput): Results {
     attributed: attributedPairs.length,
     attributedSuccess,
     unmatched: unmatchedRows.length,
-    revenueTotal,
-    revenuePaid,
-    attributedPairs,
-    preExistingPairs,
-    unmatchedRows,
+    revenueTotal, revenuePaid,
+    attributedPairs, preExistingPairs, unmatchedRows,
     ranAt: Date.now(),
   };
 }
@@ -534,7 +538,6 @@ function escapeCsvCell(v: unknown): string {
 
 function downloadCSV(filename: string, rows: Record<string, unknown>[]) {
   if (rows.length === 0) { alert('No rows to export.'); return; }
-  // Union of keys preserves enrichment columns added at the end
   const keys: string[] = [];
   const seen = new Set<string>();
   for (const r of rows) {
@@ -557,8 +560,6 @@ function downloadCSV(filename: string, rows: Record<string, unknown>[]) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-// Build the download payload for a matched-pair set — A row + selected B
-// columns prefixed with `_match_` so they don't collide with A columns.
 function flattenPairs(pairs: MatchedPair[], mappingB: ColumnMappingB): Record<string, unknown>[] {
   return pairs.map(p => {
     const out: Record<string, unknown> = { ...p.a };
@@ -577,7 +578,12 @@ function flattenPairs(pairs: MatchedPair[], mappingB: ColumnMappingB): Record<st
 // =============================================================================
 
 export default function LeadAttributionPage() {
-  // Files
+  // File A mode
+  const [fileASource, setFileASource] = useState<FileASource>('dashboard');
+  const [dashboardRange, setDashboardRange] = useState<DashboardRange>('last_30');
+  const [loadingDashboard, setLoadingDashboard] = useState(false);
+
+  // Files (after load — same shape regardless of source)
   const [fileA, setFileA] = useState<CSVData | null>(null);
   const [fileB, setFileB] = useState<CSVData | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -586,7 +592,7 @@ export default function LeadAttributionPage() {
   const [mappingA, setMappingA] = useState<ColumnMappingA>({ phone: '', date: '' });
   const [mappingB, setMappingB] = useState<ColumnMappingB>({ phone: '', date: '' });
 
-  // Bucket / status presets — detected from File A / File B
+  // Bucket / status presets
   const bucketColA = useMemo(
     () => fileA ? detectCategoricalColumn(fileA.columns, BUCKET_COL_PATTERNS) : null,
     [fileA],
@@ -619,30 +625,61 @@ export default function LeadAttributionPage() {
   const [results, setResults] = useState<Results | null>(null);
   const [running, setRunning] = useState(false);
 
-  // Live row counts after filtering — shown in each panel header
-  const filteredACount = useMemo(() => {
-    if (!fileA) return 0;
-    return fileA.rows.filter(row => {
-      if (bucketColA && bucketSelA.size > 0) {
-        const v = (row[bucketColA] ?? '').trim();
-        if (!bucketSelA.has(v)) return false;
+  // ---- File A: dashboard fetch ----
+  const fetchDashboardLeads = useCallback(async (range: DashboardRange) => {
+    setParseError(null);
+    setLoadingDashboard(true);
+    setResults(null);
+    try {
+      const cfg = RANGE_OPTIONS.find(r => r.key === range);
+      const today = todayIST();
+      const startIso = cfg?.days
+        ? isoMinusDays(today, cfg.days)
+        : '2020-01-01';
+      const filters: Filters = {
+        start: new Date(`${startIso}T00:00:00+05:30`),
+        end:   new Date(`${today}T23:59:59+05:30`),
+        vendor_ids: [],
+        campaign_ids: [],
+      };
+      const url = api.exportCallsUrl(filters, {});
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const text = await resp.text();
+      const parsed = parseCSV(text);
+      if (parsed.columns.length === 0 || parsed.rows.length === 0) {
+        throw new Error('Dashboard returned no leads for this date range.');
       }
-      return passesAllFilters(row, filtersA);
-    }).length;
-  }, [fileA, bucketColA, bucketSelA, filtersA]);
+      // Enrich every row with a computed bucket
+      const enrichedRows = parsed.rows.map(r => ({
+        ...r,
+        _bucket: computeBucket(r),
+      }));
+      const columns = parsed.columns.includes('_bucket')
+        ? parsed.columns
+        : [...parsed.columns, '_bucket'];
+      const data: CSVData = {
+        filename: `Dashboard leads · ${cfg?.label}`,
+        columns,
+        rows: enrichedRows,
+      };
+      setFileA(data);
+      setMappingA({
+        phone: 'mobile_number',
+        date:  'final_lead_status_date',
+      });
+      const uniqueBuckets = uniqueValues(enrichedRows, '_bucket');
+      setBucketSelA(defaultBucketSelection(uniqueBuckets));
+      setFiltersA([]);
+    } catch (e: any) {
+      setParseError(`Dashboard fetch failed: ${e?.message || 'unknown error'}`);
+      setFileA(null);
+    } finally {
+      setLoadingDashboard(false);
+    }
+  }, []);
 
-  const filteredBCount = useMemo(() => {
-    if (!fileB) return 0;
-    return fileB.rows.filter(row => {
-      if (statusColB && statusSelB.size > 0) {
-        const v = (row[statusColB] ?? '').trim();
-        if (!statusSelB.has(v)) return false;
-      }
-      return passesAllFilters(row, filtersB);
-    }).length;
-  }, [fileB, statusColB, statusSelB, filtersB]);
-
-  // ---- File handlers ----
+  // ---- File handlers (upload mode) ----
   const handleFileLoad = useCallback(
     async (which: 'A' | 'B', file: File) => {
       setParseError(null);
@@ -674,9 +711,7 @@ export default function LeadAttributionPage() {
           setMappingB(autoDetectB(parsed.columns));
           const col = detectCategoricalColumn(parsed.columns, STATUS_COL_PATTERNS);
           if (col) {
-            const vals = uniqueValues(parsed.rows, col);
-            // Default to ALL on for status — user narrows from there
-            setStatusSelB(new Set(vals));
+            setStatusSelB(new Set(uniqueValues(parsed.rows, col)));
           } else {
             setStatusSelB(new Set());
           }
@@ -708,15 +743,50 @@ export default function LeadAttributionPage() {
     setBucketSelA(new Set()); setStatusSelB(new Set());
     setFiltersA([]); setFiltersB([]);
     setResults(null); setParseError(null);
+    setFileASource('dashboard');
+    setDashboardRange('last_30');
   };
 
-  // ---- Run ----
-  const canRun = fileA && fileB && mappingA.phone && mappingA.date && mappingB.phone && mappingB.date;
+  // Switch A source — clears existing A data so the user re-loads it
+  const switchASource = (next: FileASource) => {
+    if (next === fileASource) return;
+    setFileASource(next);
+    setFileA(null);
+    setBucketSelA(new Set());
+    setFiltersA([]);
+    setMappingA({ phone: '', date: '' });
+    setResults(null);
+    setParseError(null);
+  };
+
+  // ---- Live row counts after filtering ----
+  const filteredACount = useMemo(() => {
+    if (!fileA) return 0;
+    return fileA.rows.filter(row => {
+      if (bucketColA && bucketSelA.size > 0) {
+        const v = (row[bucketColA] ?? '').trim();
+        if (!bucketSelA.has(v)) return false;
+      }
+      return passesAllFilters(row, filtersA);
+    }).length;
+  }, [fileA, bucketColA, bucketSelA, filtersA]);
+
+  const filteredBCount = useMemo(() => {
+    if (!fileB) return 0;
+    return fileB.rows.filter(row => {
+      if (statusColB && statusSelB.size > 0) {
+        const v = (row[statusColB] ?? '').trim();
+        if (!statusSelB.has(v)) return false;
+      }
+      return passesAllFilters(row, filtersB);
+    }).length;
+  }, [fileB, statusColB, statusSelB, filtersB]);
+
+  const canRun = !!fileA && !!fileB && !!mappingA.phone && !!mappingA.date && !!mappingB.phone && !!mappingB.date;
 
   const handleRun = () => {
     if (!canRun || !fileA || !fileB) return;
     setRunning(true);
-    // Yield to browser so the "Running…" state actually renders
     setTimeout(() => {
       const r = runAttribution({
         fileA, fileB, mappingA, mappingB,
@@ -726,7 +796,6 @@ export default function LeadAttributionPage() {
       });
       setResults(r);
       setRunning(false);
-      // Scroll to results
       setTimeout(() => {
         const el = document.getElementById('attribution-results');
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -736,28 +805,20 @@ export default function LeadAttributionPage() {
 
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1100px] mx-auto">
-      {/* ---- Header ---- */}
       <header>
         <h1 className="text-xl md:text-2xl font-semibold text-brand-navy flex items-center gap-2">
           <Shuffle size={22} className="text-brand-pink" />
           Lead Attribution
         </h1>
         <p className="text-xs md:text-sm text-surface-500 mt-1">
-          Upload two CSVs to check which leads from File&nbsp;A actually converted into paid users in File&nbsp;B.
-          Filters apply before matching. Everything runs in your browser — no data leaves this page.
+          Check which leads from this dashboard became paid users in an external file.
+          Pull leads directly from the dashboard (default) or upload a custom list, then
+          upload your payments / outcomes CSV. Filters apply before matching.
         </p>
       </header>
 
-      {/* ---- Step strip ---- */}
-      <StepStrip
-        active={
-          !fileA || !fileB ? 1
-          : !results ? 3
-          : 4
-        }
-      />
+      <StepStrip active={!fileA || !fileB ? 1 : !results ? 3 : 4} />
 
-      {/* ---- Parse error ---- */}
       {parseError && (
         <div className="card p-3 flex items-start gap-2 border border-red-200 bg-red-50 text-red-700 text-xs">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
@@ -765,24 +826,80 @@ export default function LeadAttributionPage() {
         </div>
       )}
 
-      {/* ---- Step 1: Files ---- */}
+      {/* ---- Step 1: Sources ---- */}
       <section>
-        <h2 className="text-sm font-medium text-brand-navy mb-2">Step 1 — Files</h2>
+        <h2 className="text-sm font-medium text-brand-navy mb-2">Step 1 — Sources</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <FileDropZone
-            label="File A — events / leads"
-            sublabel="dashboard export, lead list, calls"
-            data={fileA}
-            onLoad={(f) => handleFileLoad('A', f)}
-            onClear={() => clearFile('A')}
-          />
-          <FileDropZone
-            label="File B — outcomes / payments"
-            sublabel="CRM payments, signups, conversions"
-            data={fileB}
-            onLoad={(f) => handleFileLoad('B', f)}
-            onClear={() => clearFile('B')}
-          />
+          {/* File A panel */}
+          <div className="card p-3">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="text-[11px] uppercase tracking-wider text-surface-500">File A — leads</div>
+              <div className="inline-flex bg-surface-100 border border-surface-200 rounded p-0.5 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => switchASource('dashboard')}
+                  className={`px-2 py-0.5 rounded inline-flex items-center gap-1 ${
+                    fileASource === 'dashboard'
+                      ? 'bg-white text-brand-navy font-medium shadow-sm'
+                      : 'text-surface-500 hover:text-brand-navy'
+                  }`}
+                >
+                  <Database size={11} />
+                  Dashboard
+                </button>
+                <button
+                  type="button"
+                  onClick={() => switchASource('upload')}
+                  className={`px-2 py-0.5 rounded inline-flex items-center gap-1 ${
+                    fileASource === 'upload'
+                      ? 'bg-white text-brand-navy font-medium shadow-sm'
+                      : 'text-surface-500 hover:text-brand-navy'
+                  }`}
+                >
+                  <Upload size={11} />
+                  Upload
+                </button>
+              </div>
+            </div>
+
+            {fileASource === 'dashboard' ? (
+              <DashboardSourcePanel
+                range={dashboardRange}
+                setRange={setDashboardRange}
+                loading={loadingDashboard}
+                fileA={fileA}
+                onLoad={fetchDashboardLeads}
+                onClear={() => clearFile('A')}
+              />
+            ) : (
+              fileA ? (
+                <LoadedFileChip data={fileA} onClear={() => clearFile('A')} />
+              ) : (
+                <UploadDropZone
+                  label="Drop leads CSV"
+                  sublabel="any list of leads with a phone column"
+                  onLoad={f => handleFileLoad('A', f)}
+                />
+              )
+            )}
+          </div>
+
+          {/* File B panel */}
+          <div className="card p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[11px] uppercase tracking-wider text-surface-500">File B — outcomes / payments</div>
+              <div className="text-[11px] text-surface-400">Upload only</div>
+            </div>
+            {fileB ? (
+              <LoadedFileChip data={fileB} onClear={() => clearFile('B')} />
+            ) : (
+              <UploadDropZone
+                label="Drop payments CSV"
+                sublabel="CRM transactions, signups, etc."
+                onLoad={f => handleFileLoad('B', f)}
+              />
+            )}
+          </div>
         </div>
       </section>
 
@@ -792,9 +909,26 @@ export default function LeadAttributionPage() {
           <h2 className="text-sm font-medium text-brand-navy mb-2">Step 2 — Map columns</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div className="card p-3 space-y-2">
-              <div className="text-[11px] uppercase tracking-wider text-surface-500">File A</div>
-              <ColumnPicker label="Phone" columns={fileA.columns} value={mappingA.phone} onChange={v => setMappingA(m => ({ ...m, phone: v }))} />
-              <ColumnPicker label="Date"  columns={fileA.columns} value={mappingA.date}  onChange={v => setMappingA(m => ({ ...m, date: v  }))} />
+              <div className="flex items-center justify-between">
+                <div className="text-[11px] uppercase tracking-wider text-surface-500">File A</div>
+                {fileASource === 'dashboard' && (
+                  <div className="text-[10px] text-surface-400 italic">auto-mapped</div>
+                )}
+              </div>
+              <ColumnPicker
+                label="Phone"
+                columns={fileA.columns}
+                value={mappingA.phone}
+                onChange={v => setMappingA(m => ({ ...m, phone: v }))}
+                disabled={fileASource === 'dashboard'}
+              />
+              <ColumnPicker
+                label="Date"
+                columns={fileA.columns}
+                value={mappingA.date}
+                onChange={v => setMappingA(m => ({ ...m, date: v }))}
+                disabled={fileASource === 'dashboard'}
+              />
             </div>
             <div className="card p-3 space-y-2">
               <div className="text-[11px] uppercase tracking-wider text-surface-500">File B</div>
@@ -813,7 +947,6 @@ export default function LeadAttributionPage() {
         <section>
           <h2 className="text-sm font-medium text-brand-navy mb-2">Step 3 — Filters &amp; rule</h2>
 
-          {/* Rule strip */}
           <div className="card p-3 mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
             <span className="text-[10px] uppercase tracking-wider text-surface-500">Rule</span>
             <label className="inline-flex items-center gap-1.5 cursor-pointer">
@@ -833,21 +966,21 @@ export default function LeadAttributionPage() {
             </label>
           </div>
 
-          {/* File A filters */}
           <FilterPanel
             label="File A — leads"
             totalRows={fileA.rows.length}
             filteredRows={filteredACount}
             bucketColumn={bucketColA}
+            bucketColumnLabel="Bucket"
             bucketValues={bucketValuesA}
             bucketSel={bucketSelA}
             setBucketSel={setBucketSelA}
             customFilters={filtersA}
             setCustomFilters={setFiltersA}
             columns={fileA.columns}
+            hideDetectionHint={fileASource === 'dashboard'}
           />
 
-          {/* File B filters */}
           <FilterPanel
             label="File B — payments"
             totalRows={fileB.rows.length}
@@ -862,7 +995,6 @@ export default function LeadAttributionPage() {
             columns={fileB.columns}
           />
 
-          {/* Run row */}
           <div className="flex items-center justify-between mt-2">
             <div className="text-[11px] text-surface-500">
               Will match <strong className="text-brand-navy">{fmtInt(filteredACount)}</strong> leads against{' '}
@@ -904,17 +1036,15 @@ export default function LeadAttributionPage() {
         </section>
       )}
 
-      {/* ---- Helper note ---- */}
       <div className="card p-4 text-[11px] text-surface-500 leading-relaxed">
         <strong className="text-surface-700">How attribution is computed:</strong> phones are normalized
         (strips +91, leading 0, spaces, dashes; keeps last 10 digits if they start with 6-9). For each lead
-        in File&nbsp;A, we look for the earliest payment in File&nbsp;B with the same phone where the rule
-        passes. "B after A" excludes pre-existing customers — they would have converted anyway, so attributing
-        them to your event would inflate the number. "Pre-existing" counts phones that exist in File&nbsp;B
-        only with earlier dates. "Attributed" counts phones with at least one B-after-A match. Revenue uses
-        the matched B row (earliest qualifying). Amount = primary total (typically <code>totalAmount</code>),
-        Paid = first-installment receipts (typically <code>paidAmount</code>) — the gap reflects EMI plans
-        that haven't fully cleared yet.
+        in File&nbsp;A, the tool looks for the earliest payment in File&nbsp;B with the same phone where the
+        rule passes. "B after A" excludes pre-existing customers — they would have converted anyway, so
+        attributing them inflates the number. "Pre-existing" counts phones that exist in File&nbsp;B only
+        with earlier dates. "Attributed" counts phones with at least one B-after-A match. Revenue uses the
+        matched B row (earliest qualifying). Bucket pills on File&nbsp;A use the same definitions as the
+        Leads page (Top Priority = interested + callback, etc.).
       </div>
     </div>
   );
@@ -926,7 +1056,7 @@ export default function LeadAttributionPage() {
 
 function StepStrip({ active }: { active: 1 | 2 | 3 | 4 }) {
   const steps = [
-    { n: 1, label: 'Upload' },
+    { n: 1, label: 'Sources' },
     { n: 2, label: 'Map columns' },
     { n: 3, label: 'Configure' },
     { n: 4, label: 'Results' },
@@ -937,9 +1067,7 @@ function StepStrip({ active }: { active: 1 | 2 | 3 | 4 }) {
         <span key={s.n} className="inline-flex items-center gap-1">
           <span
             className={`px-2.5 py-1 rounded ${
-              s.n <= active
-                ? 'bg-brand-pink/10 text-brand-pink font-medium'
-                : 'bg-surface-100 text-surface-500'
+              s.n <= active ? 'bg-brand-pink/10 text-brand-pink font-medium' : 'bg-surface-100 text-surface-500'
             }`}
           >
             {s.n} {s.label}
@@ -951,52 +1079,104 @@ function StepStrip({ active }: { active: 1 | 2 | 3 | 4 }) {
   );
 }
 
-function FileDropZone({
-  label, sublabel, data, onLoad, onClear,
+function DashboardSourcePanel({
+  range, setRange, loading, fileA, onLoad, onClear,
+}: {
+  range: DashboardRange;
+  setRange: (r: DashboardRange) => void;
+  loading: boolean;
+  fileA: CSVData | null;
+  onLoad: (r: DashboardRange) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2 text-xs">
+        <label className="text-surface-500">Date range</label>
+        <select
+          value={range}
+          onChange={e => {
+            const v = e.target.value as DashboardRange;
+            setRange(v);
+            // Auto-fetch when user changes range and we already have data;
+            // otherwise wait for the button.
+            if (fileA) onLoad(v);
+          }}
+          className="text-xs px-2 py-1 border border-surface-200 rounded bg-white text-brand-navy hover:border-surface-300 focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
+        >
+          {RANGE_OPTIONS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
+        </select>
+        <div className="flex-1" />
+        {fileA ? (
+          <button
+            type="button"
+            onClick={() => onLoad(range)}
+            disabled={loading}
+            className="text-[11px] px-2 py-1 rounded text-surface-500 hover:text-brand-navy disabled:opacity-50 inline-flex items-center gap-1"
+          >
+            {loading ? <Loader2 size={11} className="animate-spin" /> : <RotateCcw size={11} />}
+            Refresh
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onLoad(range)}
+            disabled={loading}
+            className="text-xs px-3 py-1 rounded-md bg-brand-navy text-white font-medium inline-flex items-center gap-1.5 hover:bg-brand-navy/90 disabled:opacity-50"
+          >
+            {loading ? <Loader2 size={12} className="animate-spin" /> : <Database size={12} />}
+            {loading ? 'Loading…' : 'Load leads'}
+          </button>
+        )}
+      </div>
+      {fileA ? (
+        <div className="bg-surface-50 border border-surface-100 rounded px-2 py-2 flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-brand-navy flex items-center gap-1.5 truncate">
+              <Database size={13} className="text-brand-pink shrink-0" />
+              <span className="truncate">{fileA.filename}</span>
+            </div>
+            <div className="text-[10px] text-surface-500 mt-0.5">
+              {fmtInt(fileA.rows.length)} unique leads · {fileA.columns.length} columns
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-surface-400 hover:text-red-600 p-0.5"
+            aria-label="Clear"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ) : (
+        <div className="text-[11px] text-surface-500 leading-relaxed">
+          Pulls deduplicated phone-level leads for the date range. The Top Priority /
+          Interested / Callback / No intent bucket is computed automatically from each
+          lead's last call.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UploadDropZone({
+  label, sublabel, onLoad,
 }: {
   label: string;
   sublabel: string;
-  data: CSVData | null;
   onLoad: (f: File) => void;
-  onClear: () => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
-
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const f = e.dataTransfer.files?.[0];
     if (f) onLoad(f);
   };
-
-  if (data) {
-    return (
-      <div className="card p-3 flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-[11px] text-surface-500">{label}</div>
-          <div className="text-sm font-medium text-brand-navy flex items-center gap-1.5 truncate">
-            <FileSpreadsheet size={14} className="text-brand-pink shrink-0" />
-            <span className="truncate" title={data.filename}>{data.filename}</span>
-          </div>
-          <div className="text-[10px] text-surface-400 mt-0.5">
-            {fmtInt(data.rows.length)} rows · {data.columns.length} columns
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onClear}
-          className="text-surface-400 hover:text-red-600 p-1"
-          aria-label="Remove file"
-        >
-          <X size={14} />
-        </button>
-      </div>
-    );
-  }
-
   return (
     <label
-      className={`card p-4 cursor-pointer border-dashed border-2 transition-colors text-center block ${
+      className={`cursor-pointer border-dashed border-2 rounded-md transition-colors text-center block py-4 px-3 ${
         dragOver ? 'border-brand-pink bg-brand-pink/5' : 'border-surface-200 hover:border-surface-300'
       }`}
       onDragOver={e => { e.preventDefault(); setDragOver(true); }}
@@ -1012,22 +1192,47 @@ function FileDropZone({
           if (f) onLoad(f);
         }}
       />
-      <Upload size={18} className="mx-auto text-surface-400 mb-1" />
+      <Upload size={16} className="mx-auto text-surface-400 mb-1" />
       <div className="text-xs font-medium text-brand-navy">{label}</div>
       <div className="text-[10px] text-surface-500 mt-0.5">{sublabel}</div>
-      <div className="text-[10px] text-surface-400 mt-1">Drop CSV here or click to browse</div>
+      <div className="text-[10px] text-surface-400 mt-1">Drop or click to browse</div>
     </label>
   );
 }
 
+function LoadedFileChip({ data, onClear }: { data: CSVData; onClear: () => void }) {
+  return (
+    <div className="bg-surface-50 border border-surface-100 rounded px-2 py-2 flex items-start justify-between gap-2">
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-brand-navy flex items-center gap-1.5 truncate">
+          <FileSpreadsheet size={13} className="text-brand-pink shrink-0" />
+          <span className="truncate" title={data.filename}>{data.filename}</span>
+        </div>
+        <div className="text-[10px] text-surface-500 mt-0.5">
+          {fmtInt(data.rows.length)} rows · {data.columns.length} columns
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onClear}
+        className="text-surface-400 hover:text-red-600 p-0.5"
+        aria-label="Clear"
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
 function ColumnPicker({
-  label, columns, value, onChange, optional = false,
+  label, columns, value, onChange, optional = false, disabled = false,
 }: {
   label: string;
   columns: string[];
   value: string;
   onChange: (v: string) => void;
   optional?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-2 text-xs">
@@ -1035,7 +1240,10 @@ function ColumnPicker({
       <select
         value={value}
         onChange={e => onChange(e.target.value)}
-        className="flex-1 text-xs px-2 py-1 border border-surface-200 rounded bg-white text-brand-navy hover:border-surface-300 focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
+        disabled={disabled}
+        className={`flex-1 text-xs px-2 py-1 border border-surface-200 rounded bg-white text-brand-navy hover:border-surface-300 focus:outline-none focus:ring-2 focus:ring-brand-pink/30 ${
+          disabled ? 'opacity-60 cursor-not-allowed' : ''
+        }`}
       >
         {optional && <option value="">(none)</option>}
         {columns.map(c => <option key={c} value={c}>{c}</option>)}
@@ -1047,7 +1255,7 @@ function ColumnPicker({
 function FilterPanel({
   label, totalRows, filteredRows,
   bucketColumn, bucketColumnLabel = 'Bucket', bucketValues, bucketSel, setBucketSel,
-  customFilters, setCustomFilters, columns,
+  customFilters, setCustomFilters, columns, hideDetectionHint = false,
 }: {
   label: string;
   totalRows: number;
@@ -1060,6 +1268,7 @@ function FilterPanel({
   customFilters: FilterRule[];
   setCustomFilters: (f: FilterRule[]) => void;
   columns: string[];
+  hideDetectionHint?: boolean;
 }) {
   const toggleBucket = (v: string) => {
     const next = new Set(bucketSel);
@@ -1088,11 +1297,13 @@ function FilterPanel({
         </div>
       </div>
 
-      {/* Bucket / status preset pills */}
       {bucketColumn && bucketValues.length > 0 && (
         <div className="mb-2.5">
           <div className="text-[10px] text-surface-500 mb-1">
-            {bucketColumnLabel} <span className="italic text-surface-400">(detected from <code className="text-[9px]">{bucketColumn}</code>)</span>
+            {bucketColumnLabel}
+            {!hideDetectionHint && (
+              <span className="italic text-surface-400"> (detected from <code className="text-[9px]">{bucketColumn}</code>)</span>
+            )}
           </div>
           <div className="flex flex-wrap gap-1.5 items-center">
             {bucketValues.map(v => {
@@ -1131,7 +1342,6 @@ function FilterPanel({
         </div>
       )}
 
-      {/* Custom filters */}
       <div className={bucketColumn ? 'border-t border-surface-100 pt-2' : ''}>
         {customFilters.length > 0 && (
           <div className="text-[10px] text-surface-500 mb-1">Custom filters (AND)</div>
@@ -1228,13 +1438,11 @@ function ResultsBlock({
   hasStatus: boolean;
 }) {
   const { totalA, keyMatched, preExisting, attributed, attributedSuccess, unmatched, revenueTotal, revenuePaid } = results;
-
   return (
     <>
-      {/* KPI strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
         <KPI label="Leads (File A)" value={fmtInt(totalA)} />
-        <KPI label="Attributed"     value={fmtInt(attributed)} sub={fmtPct(attributed, totalA)} accent="green" />
+        <KPI label="Attributed" value={fmtInt(attributed)} sub={fmtPct(attributed, totalA)} accent="green" />
         {hasAmount && <KPI label="Revenue (total)" value={fmtINR(revenueTotal)} />}
         {hasPaid   && <KPI label="Revenue (paid)"  value={fmtINR(revenuePaid)} />}
         {!hasAmount && !hasPaid && (
@@ -1245,7 +1453,6 @@ function ResultsBlock({
         )}
       </div>
 
-      {/* Funnel */}
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <tbody>
@@ -1254,14 +1461,13 @@ function ResultsBlock({
             <FunnelRow label="B before A — pre-existing customers" count={preExisting} total={totalA} indent={2} chip="amber" chipLabel="Pre-existing" />
             <FunnelRow label="B after A — attributed" count={attributed} total={totalA} indent={2} chip="green" chipLabel="Attributed" emphasize />
             {hasStatus && (
-              <FunnelRow label={`Status = success (paid / successful / completed)`} count={attributedSuccess} total={totalA} indent={3} />
+              <FunnelRow label="Status = success (paid / successful / completed)" count={attributedSuccess} total={totalA} indent={3} />
             )}
             <FunnelRow label="No match in File B" count={unmatched} total={totalA} indent={1} muted />
           </tbody>
         </table>
       </div>
 
-      {/* Revenue breakdown if amount info exists */}
       {(hasAmount || hasPaid) && (
         <div className="card p-3 mt-3">
           <div className="text-[11px] uppercase tracking-wider text-surface-500 mb-2">Attributed revenue</div>
@@ -1290,7 +1496,6 @@ function ResultsBlock({
         </div>
       )}
 
-      {/* Downloads */}
       <div className="flex flex-wrap gap-2 mt-3">
         <button
           type="button"
