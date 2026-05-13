@@ -17,8 +17,6 @@ const NAV = [
   { href: '/lookup',          label: 'Lookup (For BD)',   icon: Search },
   { href: '/attribution',     label: 'Lead Attribution',  icon: Shuffle },
 ];
-  
-];
 
 // Desktop sidebar. Hidden on viewports below lg (1024px) — those use MobileNav.
 // On the BDA lookup hostname (ai-lookup.vercel.app), the root layout skips
