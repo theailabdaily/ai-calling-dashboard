@@ -80,6 +80,10 @@ type MatchedPair = {
   bDateIso: string | null;
   aDateIso: string | null;
   lagDays: number | null;
+  // Mapping that was used to read the B row. Lets the preview table /
+  // download read amount / paid / extras with the correct source-specific
+  // column names rather than assuming a single global mappingB.
+  bMapping: ColumnMappingB;
 };
 
 type Results = {
@@ -585,11 +589,15 @@ function dashboardFilenameFor(rangeLabel: string, vCount: number, cCount: number
 
 // ---- Attribution algorithm -------------------------------------------------
 
+// Each A or B source feeds into the algorithm as a (rows, mapping) pair.
+// The algorithm reads phone/date/amount/etc from `mapping`, so files with
+// different column names (mobile vs phone, TxnOn vs created_at) still work.
+type SourceWithMappingA = { rows: Record<string, string>[]; mapping: ColumnMappingA };
+type SourceWithMappingB = { rows: Record<string, string>[]; mapping: ColumnMappingB };
+
 type RunInput = {
-  fileA: CSVData;
-  fileB: CSVData;
-  mappingA: ColumnMappingA;
-  mappingB: ColumnMappingB;
+  sourcesA: SourceWithMappingA[];
+  sourcesB: SourceWithMappingB[];
   filtersA: FilterRule[];
   filtersB: FilterRule[];
   bucketColA: string | null;
@@ -602,104 +610,126 @@ type RunInput = {
 
 function runAttribution(input: RunInput): Results {
   const {
-    fileA, fileB, mappingA, mappingB,
+    sourcesA, sourcesB,
     filtersA, filtersB,
     bucketColA, bucketSelA, statusColB, statusSelB,
     rule, countSameDay,
   } = input;
 
+  // Filter pass — bucket pills apply only to rows that actually have the
+  // bucket column populated. Sources without _bucket (uploaded files) pass
+  // through the bucket gate. This is intentional: a strict bucket filter on
+  // dashboard shouldn't accidentally eliminate every uploaded prospect.
   const passesA = (row: Record<string, string>): boolean => {
     if (bucketColA && bucketSelA.size > 0) {
       const v = (row[bucketColA] ?? '').trim();
-      if (!bucketSelA.has(v)) return false;
+      if (v && !bucketSelA.has(v)) return false;
     }
     return passesAllFilters(row, filtersA);
   };
   const passesB = (row: Record<string, string>): boolean => {
     if (statusColB && statusSelB.size > 0) {
       const v = (row[statusColB] ?? '').trim();
-      if (!statusSelB.has(v)) return false;
+      if (v && !statusSelB.has(v)) return false;
     }
     return passesAllFilters(row, filtersB);
   };
 
-  const filteredA = fileA.rows.filter(passesA);
-  const filteredB = fileB.rows.filter(passesB);
-
+  // Build B index by normalized phone across all sources. Each entry carries
+  // the source-specific mapping so we read amount / paid from the right column
+  // for that source.
   type IndexedB = {
     row: Record<string, string>;
     bDateIso: string | null;
     amount: number;
     amountPaid: number;
+    mapping: ColumnMappingB;
   };
 
   const bIndex = new Map<string, IndexedB[]>();
-  for (const row of filteredB) {
-    const phone = normalizePhone(row[mappingB.phone] ?? '');
-    if (!phone) continue;
-    const entry: IndexedB = {
-      row,
-      bDateIso: parseDate(row[mappingB.date] ?? ''),
-      amount: mappingB.amount ? (parseFloat(row[mappingB.amount]) || 0) : 0,
-      amountPaid: mappingB.amountPaid ? (parseFloat(row[mappingB.amountPaid]) || 0) : 0,
-    };
-    if (!bIndex.has(phone)) bIndex.set(phone, []);
-    bIndex.get(phone)!.push(entry);
+  let totalBRowsKept = 0;
+  for (const src of sourcesB) {
+    const { rows, mapping } = src;
+    for (const row of rows) {
+      if (!passesB(row)) continue;
+      totalBRowsKept++;
+      const phone = normalizePhone(row[mapping.phone] ?? '');
+      if (!phone) continue;
+      const entry: IndexedB = {
+        row,
+        bDateIso: parseDate(row[mapping.date] ?? ''),
+        amount: mapping.amount ? (parseFloat(row[mapping.amount]) || 0) : 0,
+        amountPaid: mapping.amountPaid ? (parseFloat(row[mapping.amountPaid]) || 0) : 0,
+        mapping,
+      };
+      if (!bIndex.has(phone)) bIndex.set(phone, []);
+      bIndex.get(phone)!.push(entry);
+    }
   }
   bIndex.forEach(list => {
     list.sort((x, y) => (x.bDateIso ?? '\uffff').localeCompare(y.bDateIso ?? '\uffff'));
   });
 
+  // Walk A across all sources using each one's own mapping.
   const attributedPairs: MatchedPair[] = [];
   const preExistingPairs: MatchedPair[] = [];
   const unmatchedRows: Record<string, string>[] = [];
   let revenueTotal = 0;
   let revenuePaid = 0;
+  let totalARowsKept = 0;
 
-  for (const aRow of filteredA) {
-    const aPhone = normalizePhone(aRow[mappingA.phone] ?? '');
-    const aDateIso = parseDate(aRow[mappingA.date] ?? '');
+  for (const src of sourcesA) {
+    const { rows, mapping } = src;
+    for (const aRow of rows) {
+      if (!passesA(aRow)) continue;
+      totalARowsKept++;
+      const aPhone = normalizePhone(aRow[mapping.phone] ?? '');
+      const aDateIso = parseDate(aRow[mapping.date] ?? '');
 
-    if (!aPhone) { unmatchedRows.push(aRow); continue; }
+      if (!aPhone) { unmatchedRows.push(aRow); continue; }
 
-    const candidates = bIndex.get(aPhone);
-    if (!candidates || candidates.length === 0) {
-      unmatchedRows.push(aRow);
-      continue;
-    }
+      const candidates = bIndex.get(aPhone);
+      if (!candidates || candidates.length === 0) {
+        unmatchedRows.push(aRow);
+        continue;
+      }
 
-    let matched: IndexedB | null = null;
-    let earliestBefore: IndexedB | null = null;
-    for (const b of candidates) {
-      if (rule === 'any_time') { matched = b; break; }
-      if (!aDateIso || !b.bDateIso) continue;
-      if (b.bDateIso > aDateIso) { matched = b; break; }
-      if (b.bDateIso === aDateIso && countSameDay) { matched = b; break; }
-      if (!earliestBefore) earliestBefore = b;
-    }
+      let matched: IndexedB | null = null;
+      let earliestBefore: IndexedB | null = null;
+      for (const b of candidates) {
+        if (rule === 'any_time') { matched = b; break; }
+        if (!aDateIso || !b.bDateIso) continue;
+        if (b.bDateIso > aDateIso) { matched = b; break; }
+        if (b.bDateIso === aDateIso && countSameDay) { matched = b; break; }
+        if (!earliestBefore) earliestBefore = b;
+      }
 
-    if (matched) {
-      attributedPairs.push({
-        a: aRow, b: matched.row,
-        bDateIso: matched.bDateIso, aDateIso,
-        lagDays: daysBetween(aDateIso, matched.bDateIso),
-      });
-      revenueTotal += matched.amount;
-      revenuePaid  += matched.amountPaid;
-    } else if (earliestBefore || candidates.length > 0) {
-      const b = earliestBefore ?? candidates[0];
-      preExistingPairs.push({
-        a: aRow, b: b.row,
-        bDateIso: b.bDateIso, aDateIso,
-        lagDays: daysBetween(aDateIso, b.bDateIso),
-      });
-    } else {
-      unmatchedRows.push(aRow);
+      if (matched) {
+        attributedPairs.push({
+          a: aRow, b: matched.row,
+          bDateIso: matched.bDateIso, aDateIso,
+          lagDays: daysBetween(aDateIso, matched.bDateIso),
+          bMapping: matched.mapping,
+        });
+        revenueTotal += matched.amount;
+        revenuePaid  += matched.amountPaid;
+      } else if (earliestBefore || candidates.length > 0) {
+        const b = earliestBefore ?? candidates[0];
+        preExistingPairs.push({
+          a: aRow, b: b.row,
+          bDateIso: b.bDateIso, aDateIso,
+          lagDays: daysBetween(aDateIso, b.bDateIso),
+          bMapping: b.mapping,
+        });
+      } else {
+        unmatchedRows.push(aRow);
+      }
     }
   }
 
+  void totalBRowsKept; // reserved for future per-source counters
   return {
-    totalA: filteredA.length,
+    totalA: totalARowsKept,
     keyMatched: attributedPairs.length + preExistingPairs.length,
     preExisting: preExistingPairs.length,
     attributed: attributedPairs.length,
@@ -743,18 +773,19 @@ function downloadCSV(filename: string, rows: Record<string, unknown>[]) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function flattenPairs(pairs: MatchedPair[], mappingB: ColumnMappingB): Record<string, unknown>[] {
+function flattenPairs(pairs: MatchedPair[]): Record<string, unknown>[] {
   return pairs.map(p => {
+    const mb = p.bMapping;
     const out: Record<string, unknown> = { ...p.a };
-    out['_match_b_phone']  = normalizePhone(p.b[mappingB.phone] ?? '');
+    out['_match_b_phone']  = normalizePhone(p.b[mb.phone] ?? '');
     out['_match_b_date']   = p.bDateIso ?? '';
     out['_match_lag_days'] = p.lagDays ?? '';
-    if (mappingB.amount)     out['_match_amount']      = p.b[mappingB.amount] ?? '';
-    if (mappingB.amountPaid) out['_match_amount_paid'] = p.b[mappingB.amountPaid] ?? '';
+    if (mb.amount)     out['_match_amount']      = p.b[mb.amount] ?? '';
+    if (mb.amountPaid) out['_match_amount_paid'] = p.b[mb.amountPaid] ?? '';
     // Display extras flow into the CSV too, prefixed with `_match_` and
     // slug-cased so they don't collide with A's existing column names.
     // Empty labels are skipped (user added the row but never typed a name).
-    for (const extra of mappingB.extras) {
+    for (const extra of mb.extras) {
       const lbl = extra.label.trim();
       if (!lbl || !extra.column) continue;
       const slug = lbl.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
@@ -811,9 +842,15 @@ export default function LeadAttributionPage() {
   // lock + the "auto-mapped" hint in Step 2.
   const hasDashboardA = !!dashboardData;
 
-  // Mappings
-  const [mappingA, setMappingA] = useState<ColumnMappingA>({ phone: '', date: '', extras: [] });
-  const [mappingB, setMappingB] = useState<ColumnMappingB>({ phone: '', date: '', extras: [] });
+  // Per-source mappings. Dashboard gets its own slot since it survives upload
+  // add/remove; uploads use parallel arrays so indexes stay stable. The
+  // algorithm reads `mappingDashboardA` for dashboard rows and `mappingsUploadsA[i]`
+  // for the i-th uploaded A file. Each B file has its own mapping in mappingsB[i].
+  // This lets File A.1 use `mobile_number` while File A.2 uses `phone` — both
+  // become "phone column for that source" when matching.
+  const [mappingDashboardA, setMappingDashboardA] = useState<ColumnMappingA | null>(null);
+  const [mappingsUploadsA, setMappingsUploadsA] = useState<ColumnMappingA[]>([]);
+  const [mappingsB, setMappingsB] = useState<ColumnMappingB[]>([]);
 
   // Bucket / status presets
   const bucketColA = useMemo(
@@ -848,54 +885,90 @@ export default function LeadAttributionPage() {
   const [results, setResults] = useState<Results | null>(null);
   const [running, setRunning] = useState(false);
 
-  // When the merged fileA columns change, re-run auto-detect for mappings.
-  // This handles two important cases: (1) dashboard fetch completes, (2) user
-  // adds an uploaded file that introduces new columns. We only stomp current
-  // mappings if they aren't valid against the new column set.
-  useEffect(() => {
-    if (!fileA) return;
-    setMappingA(prev => {
-      const phoneOk = prev.phone && fileA.columns.includes(prev.phone);
-      const dateOk = prev.date && fileA.columns.includes(prev.date);
-      const next = autoDetectA(fileA.columns);
-      return {
-        phone: phoneOk ? prev.phone : next.phone,
-        date:  dateOk  ? prev.date  : next.date,
-        // Keep existing extras whose columns still exist; append any new auto-detected
-        // ones that aren't already in the list.
-        extras: [
-          ...prev.extras.filter(e => fileA.columns.includes(e.column)),
-          ...next.extras.filter(ne => !prev.extras.some(pe => pe.label === ne.label)),
-        ],
-      };
-    });
-  }, [fileA]);
+  // Per-source auto-mapping. When the dashboard fetch arrives or a new file is
+  // uploaded, initialize a mapping for it (auto-detect Phone/Date/Amount/etc
+  // from its own columns). When a source is removed, drop its mapping. We sync
+  // the parallel arrays length to the source arrays on every change.
 
+  // Dashboard mapping — null when no dashboard, locked-mapped (mobile_number /
+  // final_lead_status_date) when present since we know what export columns look like.
   useEffect(() => {
-    if (!fileB) return;
-    setMappingB(prev => {
-      const phoneOk = prev.phone && fileB.columns.includes(prev.phone);
-      const dateOk = prev.date && fileB.columns.includes(prev.date);
-      const autoAmount = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS.amount]);
-      const autoPaid   = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS.amountPaid]);
-      const autoExtras: ExtraMapping[] = [];
-      for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS)) {
-        const found = findColumn(fileB.columns, patterns);
-        if (found) autoExtras.push({ label, column: found });
+    if (!dashboardData) {
+      setMappingDashboardA(null);
+      return;
+    }
+    setMappingDashboardA(prev => {
+      if (prev && dashboardData.columns.includes(prev.phone) && dashboardData.columns.includes(prev.date)) {
+        // Already has a valid mapping (e.g. user re-fetched the dashboard). Preserve
+        // user-edited extras whose columns still exist; add new presets.
+        const extras: ExtraMapping[] = [];
+        for (const e of prev.extras) {
+          if (dashboardData.columns.includes(e.column)) extras.push(e);
+        }
+        for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS_A)) {
+          if (extras.some(e => e.label === label)) continue;
+          const found = findColumn(dashboardData.columns, patterns);
+          if (found) extras.push({ label, column: found });
+        }
+        return { ...prev, extras };
       }
-      const detect = autoDetectB(fileB.columns);
+      // Fresh mapping. Dashboard export columns are known, so we hardcode the
+      // phone / date columns rather than relying on autoDetectA pattern matching.
+      const extras: ExtraMapping[] = [];
+      for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS_A)) {
+        const found = findColumn(dashboardData.columns, patterns);
+        if (found) extras.push({ label, column: found });
+      }
       return {
-        phone: phoneOk ? prev.phone : detect.phone,
-        date:  dateOk  ? prev.date  : detect.date,
-        amount:     prev.amount && fileB.columns.includes(prev.amount) ? prev.amount : autoAmount,
-        amountPaid: prev.amountPaid && fileB.columns.includes(prev.amountPaid) ? prev.amountPaid : autoPaid,
-        extras: [
-          ...prev.extras.filter(e => fileB.columns.includes(e.column)),
-          ...autoExtras.filter(ae => !prev.extras.some(pe => pe.label === ae.label)),
-        ],
+        phone: 'mobile_number',
+        date: 'final_lead_status_date',
+        extras,
       };
     });
-  }, [fileB]);
+  }, [dashboardData]);
+
+  // Uploads A mapping — sync parallel array length. New uploads get auto-detected
+  // mappings via autoDetectA; existing slots are preserved across re-renders.
+  useEffect(() => {
+    setMappingsUploadsA(prev => {
+      // Trim if uploads shrank
+      if (prev.length > uploadsA.length) return prev.slice(0, uploadsA.length);
+      // Extend with fresh mappings for newly added uploads
+      const additions: ColumnMappingA[] = [];
+      for (let i = prev.length; i < uploadsA.length; i++) {
+        additions.push(autoDetectA(uploadsA[i].columns));
+      }
+      return additions.length > 0 ? [...prev, ...additions] : prev;
+    });
+  }, [uploadsA]);
+
+  // Uploads B mapping — same pattern. Each B file detects amount / paid /
+  // product / source independently against its own column list.
+  useEffect(() => {
+    setMappingsB(prev => {
+      if (prev.length > uploadsB.length) return prev.slice(0, uploadsB.length);
+      const additions: ColumnMappingB[] = [];
+      for (let i = prev.length; i < uploadsB.length; i++) {
+        const cols = uploadsB[i].columns;
+        const autoAmount = findColumn(cols, [...OPTIONAL_B_PATTERNS.amount]);
+        const autoPaid   = findColumn(cols, [...OPTIONAL_B_PATTERNS.amountPaid]);
+        const extras: ExtraMapping[] = [];
+        for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS)) {
+          const found = findColumn(cols, patterns);
+          if (found) extras.push({ label, column: found });
+        }
+        const detect = autoDetectB(cols);
+        additions.push({
+          phone: detect.phone,
+          date: detect.date,
+          amount: autoAmount,
+          amountPaid: autoPaid,
+          extras,
+        });
+      }
+      return additions.length > 0 ? [...prev, ...additions] : prev;
+    });
+  }, [uploadsB]);
 
   // ---- File A: dashboard fetch ----
   const fetchDashboardLeads = useCallback(async (range: DashboardRange) => {
@@ -1026,8 +1099,9 @@ export default function LeadAttributionPage() {
     setDashboardData(null);
     setUploadsA([]);
     setUploadsB([]);
-    setMappingA({ phone: '', date: '', extras: [] });
-    setMappingB({ phone: '', date: '', extras: [] });
+    setMappingDashboardA(null);
+    setMappingsUploadsA([]);
+    setMappingsB([]);
     setBucketSelA(new Set());
     setStatusSelB(new Set());
     setFiltersA([]);
@@ -1063,14 +1137,83 @@ export default function LeadAttributionPage() {
     }).length;
   }, [fileB, statusColB, statusSelB, filtersB]);
 
-  const canRun = !!fileA && !!fileB && !!mappingA.phone && !!mappingA.date && !!mappingB.phone && !!mappingB.date;
+  // Build per-source data for the algorithm. Each entry pairs raw rows with
+  // that source's mapping. Dashboard slot first (if present), then uploads in
+  // their stored order.
+  const sourcesA: SourceWithMappingA[] = useMemo(() => {
+    const out: SourceWithMappingA[] = [];
+    if (dashboardData && mappingDashboardA) {
+      out.push({ rows: dashboardData.rows, mapping: mappingDashboardA });
+    }
+    for (let i = 0; i < uploadsA.length; i++) {
+      const m = mappingsUploadsA[i];
+      if (m) out.push({ rows: uploadsA[i].rows, mapping: m });
+    }
+    return out;
+  }, [dashboardData, mappingDashboardA, uploadsA, mappingsUploadsA]);
+
+  const sourcesB: SourceWithMappingB[] = useMemo(() => {
+    const out: SourceWithMappingB[] = [];
+    for (let i = 0; i < uploadsB.length; i++) {
+      const m = mappingsB[i];
+      if (m) out.push({ rows: uploadsB[i].rows, mapping: m });
+    }
+    return out;
+  }, [uploadsB, mappingsB]);
+
+  // Primary mappings — used by UI surfaces that show a single mapping for
+  // legacy reasons (preview table headers, KPI labels). For File A this is
+  // the dashboard mapping if present, otherwise the first upload's mapping.
+  // For B it's the first upload's mapping. Algorithm itself does NOT use
+  // these — it reads source-specific mappings from sourcesA / sourcesB.
+  const primaryMappingA: ColumnMappingA = mappingDashboardA ?? mappingsUploadsA[0] ?? { phone: '', date: '', extras: [] };
+  const primaryMappingB: ColumnMappingB = mappingsB[0] ?? { phone: '', date: '', extras: [] };
+
+  // Union of every B mapping's extras — drives the preview table's B columns.
+  // If File B.1 has Product mapped and File B.2 has Source mapped, both show.
+  const allBExtras: ExtraMapping[] = useMemo(() => {
+    const seen = new Set<string>();
+    const out: ExtraMapping[] = [];
+    for (const m of mappingsB) {
+      for (const e of m.extras) {
+        if (!e.label) continue;
+        if (seen.has(e.label)) continue;
+        seen.add(e.label);
+        out.push(e);
+      }
+    }
+    return out;
+  }, [mappingsB]);
+
+  // Same for A — primary's extras are the union across all A sources.
+  const allAExtras: ExtraMapping[] = useMemo(() => {
+    const seen = new Set<string>();
+    const out: ExtraMapping[] = [];
+    const all: ColumnMappingA[] = [];
+    if (mappingDashboardA) all.push(mappingDashboardA);
+    all.push(...mappingsUploadsA);
+    for (const m of all) {
+      for (const e of m.extras) {
+        if (!e.label) continue;
+        if (seen.has(e.label)) continue;
+        seen.add(e.label);
+        out.push(e);
+      }
+    }
+    return out;
+  }, [mappingDashboardA, mappingsUploadsA]);
+
+  // Run-readiness: at least one A source with a phone+date mapping, same for B
+  const canRun = sourcesA.length > 0 && sourcesB.length > 0
+    && sourcesA.every(s => s.mapping.phone && s.mapping.date)
+    && sourcesB.every(s => s.mapping.phone && s.mapping.date);
 
   const handleRun = () => {
-    if (!canRun || !fileA || !fileB) return;
+    if (!canRun) return;
     setRunning(true);
     setTimeout(() => {
       const r = runAttribution({
-        fileA, fileB, mappingA, mappingB,
+        sourcesA, sourcesB,
         filtersA, filtersB,
         bucketColA, bucketSelA, statusColB, statusSelB,
         rule, countSameDay,
@@ -1210,170 +1353,69 @@ export default function LeadAttributionPage() {
       {fileA && fileB && (
         <section>
           <h2 className="text-sm font-medium text-brand-navy mb-2">Step 2 — Map columns</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="card p-3 space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-[11px] uppercase tracking-wider text-surface-500">File A</div>
-                {hasDashboardA && uploadsA.length === 0 && (
-                  <div className="text-[10px] text-surface-400 italic">auto-mapped</div>
-                )}
-                {hasDashboardA && uploadsA.length > 0 && (
-                  <div className="text-[10px] text-surface-400 italic">{uploadsA.length + 1} sources merged</div>
-                )}
-                {!hasDashboardA && uploadsA.length > 1 && (
-                  <div className="text-[10px] text-surface-400 italic">{uploadsA.length} sources merged</div>
-                )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
+            {/* File A column — one card per A source. Dashboard slot first
+                if present, then each upload in load order. Each card maps to
+                ITS OWN file's columns, so different uploads can use different
+                column names for phone/date. */}
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wider text-surface-500 px-1">
+                File A {sourcesA.length > 1 && <span className="text-surface-400 normal-case">· {sourcesA.length} sources</span>}
               </div>
-              <ColumnPicker
-                label="Phone"
-                columns={fileA.columns}
-                value={mappingA.phone}
-                onChange={v => setMappingA(m => ({ ...m, phone: v }))}
-              />
-              <ColumnPicker
-                label="Date"
-                columns={fileA.columns}
-                value={mappingA.date}
-                onChange={v => setMappingA(m => ({ ...m, date: v }))}
-              />
-
-              {/* Display-only extras for File A — Vendor, Campaign, Agent or
-                  any custom column the user wants visible in the preview
-                  table. Editable label per row, removable with ×. */}
-              {mappingA.extras.map((extra, idx) => (
-                <ExtraMappingRow
-                  key={idx}
-                  extra={extra}
-                  columns={fileA.columns}
-                  onChangeLabel={(label) =>
-                    setMappingA(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, label } : e) }))
+              {dashboardData && mappingDashboardA && (
+                <SourceMappingCardA
+                  sourceLabel={sourcesA.length > 1 ? 'File A.1 · Dashboard' : null}
+                  data={dashboardData}
+                  mapping={mappingDashboardA}
+                  setMapping={(updater) =>
+                    setMappingDashboardA(m => (m ? updater(m) : m))
                   }
-                  onChangeColumn={(column) =>
-                    setMappingA(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, column } : e) }))
-                  }
-                  onRemove={() =>
-                    setMappingA(m => ({ ...m, extras: m.extras.filter((_, i) => i !== idx) }))
-                  }
+                  showAutoHint={uploadsA.length === 0}
                 />
-              ))}
-
-              {/* Add pills — symmetric with File B's: presets for the
-                  dashboard-export columns plus a Custom row for free-form. */}
-              <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
-                <span className="text-[10px] text-surface-400 self-center">Add:</span>
-                {Object.entries(EXTRA_PRESET_PATTERNS_A).map(([label, patterns]) => {
-                  if (mappingA.extras.some(e => e.label === label)) return null;
-                  return (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => {
-                        const detected = findColumn(fileA.columns, patterns) ?? fileA.columns[0] ?? '';
-                        setMappingA(m => ({ ...m, extras: [...m.extras, { label, column: detected }] }));
-                      }}
-                      className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
-                    >
-                      <Plus size={10} /> {label}
-                    </button>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMappingA(m => ({ ...m, extras: [...m.extras, { label: '', column: fileA.columns[0] ?? '' }] }));
-                  }}
-                  className="text-[10px] px-2 py-0.5 rounded border border-dashed border-brand-pink/40 text-brand-pink hover:bg-brand-pink/5 inline-flex items-center gap-1"
-                >
-                  <Plus size={10} /> Custom
-                </button>
-              </div>
-            </div>
-            <div className="card p-3 space-y-2">
-              <div className="text-[11px] uppercase tracking-wider text-surface-500">File B</div>
-              <ColumnPicker label="Phone" columns={fileB.columns} value={mappingB.phone} onChange={v => setMappingB(m => ({ ...m, phone: v }))} />
-              <ColumnPicker label="Date"  columns={fileB.columns} value={mappingB.date}  onChange={v => setMappingB(m => ({ ...m, date: v  }))} />
-
-              {/* Algorithm-relevant optional mappings (drive revenue KPIs). */}
-              {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
-                if (mappingB[key] === undefined) return null;
+              )}
+              {uploadsA.map((file, i) => {
+                const m = mappingsUploadsA[i];
+                if (!m) return null;
+                const label = sourcesA.length > 1
+                  ? `File A.${dashboardData ? i + 2 : i + 1} · ${file.filename}`
+                  : null;
                 return (
-                  <ColumnPicker
-                    key={key}
-                    label={OPTIONAL_B_LABELS[key]}
-                    columns={fileB.columns}
-                    value={mappingB[key] ?? ''}
-                    onChange={v => setMappingB(m => ({ ...m, [key]: v || undefined }))}
-                    onRemove={() => setMappingB(m => ({ ...m, [key]: undefined }))}
+                  <SourceMappingCardA
+                    key={`a-map-${i}`}
+                    sourceLabel={label}
+                    data={file}
+                    mapping={m}
+                    setMapping={(updater) =>
+                      setMappingsUploadsA(prev => prev.map((x, idx) => idx === i ? updater(x) : x))
+                    }
                   />
                 );
               })}
+            </div>
 
-              {/* Display-only extras — Product, Source, or any custom column
-                  the user wants visible in the preview / download. The label
-                  is editable inline so users can name it whatever they want. */}
-              {mappingB.extras.map((extra, idx) => (
-                <ExtraMappingRow
-                  key={idx}
-                  extra={extra}
-                  columns={fileB.columns}
-                  onChangeLabel={(label) =>
-                    setMappingB(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, label } : e) }))
-                  }
-                  onChangeColumn={(column) =>
-                    setMappingB(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, column } : e) }))
-                  }
-                  onRemove={() =>
-                    setMappingB(m => ({ ...m, extras: m.extras.filter((_, i) => i !== idx) }))
-                  }
-                />
-              ))}
-
-              {/* Add pills — preset shortcuts plus "+ Custom" for anything else. */}
-              <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
-                <span className="text-[10px] text-surface-400 self-center">Add:</span>
-                {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
-                  if (mappingB[key] !== undefined) return null;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => {
-                        const detected = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS[key]]);
-                        setMappingB(m => ({ ...m, [key]: detected ?? fileB.columns[0] ?? '' }));
-                      }}
-                      className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
-                    >
-                      <Plus size={10} /> {OPTIONAL_B_LABELS[key]}
-                    </button>
-                  );
-                })}
-                {Object.entries(EXTRA_PRESET_PATTERNS).map(([label, patterns]) => {
-                  // Skip if an extra row with this exact label already exists
-                  if (mappingB.extras.some(e => e.label === label)) return null;
-                  return (
-                    <button
-                      key={label}
-                      type="button"
-                      onClick={() => {
-                        const detected = findColumn(fileB.columns, patterns) ?? fileB.columns[0] ?? '';
-                        setMappingB(m => ({ ...m, extras: [...m.extras, { label, column: detected }] }));
-                      }}
-                      className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
-                    >
-                      <Plus size={10} /> {label}
-                    </button>
-                  );
-                })}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMappingB(m => ({ ...m, extras: [...m.extras, { label: '', column: fileB.columns[0] ?? '' }] }));
-                  }}
-                  className="text-[10px] px-2 py-0.5 rounded border border-dashed border-brand-pink/40 text-brand-pink hover:bg-brand-pink/5 inline-flex items-center gap-1"
-                >
-                  <Plus size={10} /> Custom
-                </button>
+            {/* File B column — one card per B upload, same per-source pattern. */}
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-wider text-surface-500 px-1">
+                File B {sourcesB.length > 1 && <span className="text-surface-400 normal-case">· {sourcesB.length} sources</span>}
               </div>
+              {uploadsB.map((file, i) => {
+                const m = mappingsB[i];
+                if (!m) return null;
+                const label = sourcesB.length > 1
+                  ? `File B.${i + 1} · ${file.filename}`
+                  : null;
+                return (
+                  <SourceMappingCardB
+                    key={`b-map-${i}`}
+                    sourceLabel={label}
+                    data={file}
+                    mapping={m}
+                    setMapping={(updater) =>
+                      setMappingsB(prev => prev.map((x, idx) => idx === i ? updater(x) : x))
+                    }
+                  />
+                );
+              })}
             </div>
           </div>
         </section>
@@ -1467,10 +1509,12 @@ export default function LeadAttributionPage() {
           <h2 className="text-sm font-medium text-brand-navy mb-2">Step 4 — Results</h2>
           <ResultsBlock
             results={results}
-            mappingA={mappingA}
-            mappingB={mappingB}
-            hasAmount={!!mappingB.amount}
-            hasPaid={!!mappingB.amountPaid}
+            mappingA={primaryMappingA}
+            mappingB={primaryMappingB}
+            hasAmount={mappingsB.some(m => !!m.amount)}
+            hasPaid={mappingsB.some(m => !!m.amountPaid)}
+            aExtras={allAExtras}
+            bExtras={allBExtras}
           />
         </section>
       )}
@@ -1896,6 +1940,206 @@ function LoadedFileChip({ data, onClear }: { data: CSVData; onClear: () => void 
   );
 }
 
+// Per-source mapping card for File A. One card per A source — dashboard
+// gets a card, each upload gets a card. Mapping is local to the card; the
+// dropdowns list ONLY that source's own columns.
+function SourceMappingCardA({
+  sourceLabel, data, mapping, setMapping, showAutoHint = false,
+}: {
+  sourceLabel: string | null;
+  data: CSVData;
+  mapping: ColumnMappingA;
+  setMapping: (updater: (m: ColumnMappingA) => ColumnMappingA) => void;
+  showAutoHint?: boolean;
+}) {
+  return (
+    <div className="card p-3 space-y-2">
+      {sourceLabel && (
+        <div className="flex items-center justify-between border-b border-surface-100 pb-1.5 mb-0.5">
+          <div className="text-[11px] font-medium text-brand-pink">
+            {sourceLabel}
+          </div>
+          <div className="text-[10px] text-surface-400">
+            {fmtInt(data.rows.length)} rows · {data.columns.length} cols
+          </div>
+        </div>
+      )}
+      {showAutoHint && (
+        <div className="flex justify-end -mt-0.5 mb-0.5">
+          <div className="text-[10px] text-surface-400 italic">auto-mapped</div>
+        </div>
+      )}
+      <ColumnPicker
+        label="Phone"
+        columns={data.columns}
+        value={mapping.phone}
+        onChange={v => setMapping(m => ({ ...m, phone: v }))}
+      />
+      <ColumnPicker
+        label="Date"
+        columns={data.columns}
+        value={mapping.date}
+        onChange={v => setMapping(m => ({ ...m, date: v }))}
+      />
+      {mapping.extras.map((extra, idx) => (
+        <ExtraMappingRow
+          key={idx}
+          extra={extra}
+          columns={data.columns}
+          onChangeLabel={(label) =>
+            setMapping(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, label } : e) }))
+          }
+          onChangeColumn={(column) =>
+            setMapping(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, column } : e) }))
+          }
+          onRemove={() =>
+            setMapping(m => ({ ...m, extras: m.extras.filter((_, i) => i !== idx) }))
+          }
+        />
+      ))}
+      <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
+        <span className="text-[10px] text-surface-400 self-center">Add:</span>
+        {Object.entries(EXTRA_PRESET_PATTERNS_A).map(([label, patterns]) => {
+          if (mapping.extras.some(e => e.label === label)) return null;
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={() => {
+                const detected = findColumn(data.columns, patterns) ?? data.columns[0] ?? '';
+                setMapping(m => ({ ...m, extras: [...m.extras, { label, column: detected }] }));
+              }}
+              className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
+            >
+              <Plus size={10} /> {label}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => {
+            setMapping(m => ({ ...m, extras: [...m.extras, { label: '', column: data.columns[0] ?? '' }] }));
+          }}
+          className="text-[10px] px-2 py-0.5 rounded border border-dashed border-brand-pink/40 text-brand-pink hover:bg-brand-pink/5 inline-flex items-center gap-1"
+        >
+          <Plus size={10} /> Custom
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Per-source mapping card for File B. Same shape as A's, plus Amount / Paid /
+// Product / Source presets and the named optional mappings.
+function SourceMappingCardB({
+  sourceLabel, data, mapping, setMapping,
+}: {
+  sourceLabel: string | null;
+  data: CSVData;
+  mapping: ColumnMappingB;
+  setMapping: (updater: (m: ColumnMappingB) => ColumnMappingB) => void;
+}) {
+  return (
+    <div className="card p-3 space-y-2">
+      {sourceLabel && (
+        <div className="flex items-center justify-between border-b border-surface-100 pb-1.5 mb-0.5">
+          <div className="text-[11px] font-medium text-brand-pink truncate" title={sourceLabel}>
+            {sourceLabel}
+          </div>
+          <div className="text-[10px] text-surface-400 shrink-0 ml-2">
+            {fmtInt(data.rows.length)} rows · {data.columns.length} cols
+          </div>
+        </div>
+      )}
+      <ColumnPicker
+        label="Phone"
+        columns={data.columns}
+        value={mapping.phone}
+        onChange={v => setMapping(m => ({ ...m, phone: v }))}
+      />
+      <ColumnPicker
+        label="Date"
+        columns={data.columns}
+        value={mapping.date}
+        onChange={v => setMapping(m => ({ ...m, date: v }))}
+      />
+      {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
+        if (mapping[key] === undefined) return null;
+        return (
+          <ColumnPicker
+            key={key}
+            label={OPTIONAL_B_LABELS[key]}
+            columns={data.columns}
+            value={mapping[key] ?? ''}
+            onChange={v => setMapping(m => ({ ...m, [key]: v || undefined }))}
+            onRemove={() => setMapping(m => ({ ...m, [key]: undefined }))}
+          />
+        );
+      })}
+      {mapping.extras.map((extra, idx) => (
+        <ExtraMappingRow
+          key={idx}
+          extra={extra}
+          columns={data.columns}
+          onChangeLabel={(label) =>
+            setMapping(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, label } : e) }))
+          }
+          onChangeColumn={(column) =>
+            setMapping(m => ({ ...m, extras: m.extras.map((e, i) => i === idx ? { ...e, column } : e) }))
+          }
+          onRemove={() =>
+            setMapping(m => ({ ...m, extras: m.extras.filter((_, i) => i !== idx) }))
+          }
+        />
+      ))}
+      <div className="flex flex-wrap gap-1.5 pt-1.5 border-t border-surface-100">
+        <span className="text-[10px] text-surface-400 self-center">Add:</span>
+        {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
+          if (mapping[key] !== undefined) return null;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => {
+                const detected = findColumn(data.columns, [...OPTIONAL_B_PATTERNS[key]]);
+                setMapping(m => ({ ...m, [key]: detected ?? data.columns[0] ?? '' }));
+              }}
+              className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
+            >
+              <Plus size={10} /> {OPTIONAL_B_LABELS[key]}
+            </button>
+          );
+        })}
+        {Object.entries(EXTRA_PRESET_PATTERNS).map(([label, patterns]) => {
+          if (mapping.extras.some(e => e.label === label)) return null;
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={() => {
+                const detected = findColumn(data.columns, patterns) ?? data.columns[0] ?? '';
+                setMapping(m => ({ ...m, extras: [...m.extras, { label, column: detected }] }));
+              }}
+              className="text-[10px] px-2 py-0.5 rounded border border-dashed border-surface-300 text-surface-500 hover:border-brand-pink hover:text-brand-pink inline-flex items-center gap-1"
+            >
+              <Plus size={10} /> {label}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => {
+            setMapping(m => ({ ...m, extras: [...m.extras, { label: '', column: data.columns[0] ?? '' }] }));
+          }}
+          className="text-[10px] px-2 py-0.5 rounded border border-dashed border-brand-pink/40 text-brand-pink hover:bg-brand-pink/5 inline-flex items-center gap-1"
+        >
+          <Plus size={10} /> Custom
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ColumnPicker({
   label, columns, value, onChange, optional = false, disabled = false, onRemove,
 }: {
@@ -2187,13 +2431,15 @@ function CustomFilterRow({
 }
 
 function ResultsBlock({
-  results, mappingA, mappingB, hasAmount, hasPaid,
+  results, mappingA, mappingB, hasAmount, hasPaid, aExtras, bExtras,
 }: {
   results: Results;
   mappingA: ColumnMappingA;
   mappingB: ColumnMappingB;
   hasAmount: boolean;
   hasPaid: boolean;
+  aExtras: ExtraMapping[];
+  bExtras: ExtraMapping[];
 }) {
   const { totalA, keyMatched, preExisting, attributed, unmatched, revenueTotal, revenuePaid } = results;
   return (
@@ -2261,6 +2507,8 @@ function ResultsBlock({
         matchedPairs={results.attributedPairs}
         mappingA={mappingA}
         mappingB={mappingB}
+        aExtras={aExtras}
+        bExtras={bExtras}
       />
       <ResultDetailSection
         title="Pre-existing"
@@ -2269,6 +2517,8 @@ function ResultsBlock({
         matchedPairs={results.preExistingPairs}
         mappingA={mappingA}
         mappingB={mappingB}
+        aExtras={aExtras}
+        bExtras={bExtras}
       />
       <ResultDetailSection
         title="Unmatched"
@@ -2277,12 +2527,14 @@ function ResultsBlock({
         unmatchedRows={results.unmatchedRows}
         mappingA={mappingA}
         mappingB={mappingB}
+        aExtras={aExtras}
+        bExtras={bExtras}
       />
 
       <div className="flex flex-wrap gap-2 mt-3">
         <button
           type="button"
-          onClick={() => downloadCSV(`attributed_leads_${Date.now()}.csv`, flattenPairs(results.attributedPairs, mappingB))}
+          onClick={() => downloadCSV(`attributed_leads_${Date.now()}.csv`, flattenPairs(results.attributedPairs))}
           disabled={results.attributedPairs.length === 0}
           className="text-xs px-3 py-1.5 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700 font-medium hover:bg-emerald-100 inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
         >
@@ -2290,7 +2542,7 @@ function ResultsBlock({
         </button>
         <button
           type="button"
-          onClick={() => downloadCSV(`preexisting_leads_${Date.now()}.csv`, flattenPairs(results.preExistingPairs, mappingB))}
+          onClick={() => downloadCSV(`preexisting_leads_${Date.now()}.csv`, flattenPairs(results.preExistingPairs))}
           disabled={results.preExistingPairs.length === 0}
           className="text-xs px-3 py-1.5 rounded-md border border-amber-200 bg-amber-50 text-amber-700 font-medium hover:bg-amber-100 inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
         >
@@ -2317,6 +2569,7 @@ function ResultDetailSection({
   title, count, chip,
   matchedPairs, unmatchedRows,
   mappingA, mappingB,
+  aExtras, bExtras,
 }: {
   title: string;
   count: number;
@@ -2325,6 +2578,8 @@ function ResultDetailSection({
   unmatchedRows?: Record<string, string>[];
   mappingA: ColumnMappingA;
   mappingB: ColumnMappingB;
+  aExtras: ExtraMapping[];
+  bExtras: ExtraMapping[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const [showCount, setShowCount] = useState(25);
@@ -2368,7 +2623,7 @@ function ResultDetailSection({
                 <th className="text-left py-2 px-3 whitespace-nowrap">Phone</th>
                 <th className="text-left py-2 px-3 whitespace-nowrap">Name</th>
                 <th className="text-left py-2 px-3 whitespace-nowrap">Bucket</th>
-                {mappingA.extras.map((e, i) => (
+                {aExtras.map((e, i) => (
                   <th key={`ha-${i}`} className="text-left py-2 px-3 whitespace-nowrap">{e.label || '—'}</th>
                 ))}
                 <th className="text-right py-2 px-3 whitespace-nowrap">A date</th>
@@ -2376,23 +2631,28 @@ function ResultDetailSection({
                 {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">Lag</th>}
                 {!isUnmatched && mappingB.amount && <th className="text-right py-2 px-3 whitespace-nowrap">Amount</th>}
                 {!isUnmatched && mappingB.amountPaid && <th className="text-right py-2 px-3 whitespace-nowrap">Paid</th>}
-                {!isUnmatched && mappingB.extras.map((e, i) => (
+                {!isUnmatched && bExtras.map((e, i) => (
                   <th key={`hb-${i}`} className="text-left py-2 px-3 whitespace-nowrap">{e.label || '—'}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {(isUnmatched
-                ? (unmatchedRows ?? []).slice(0, showCount).map(r => ({ a: r, b: {} as Record<string, string>, aDateIso: parseDate(r[mappingA.date] ?? ''), bDateIso: null, lagDays: null }))
+                ? (unmatchedRows ?? []).slice(0, showCount).map(r => ({ a: r, b: {} as Record<string, string>, aDateIso: parseDate(r[mappingA.date] ?? ''), bDateIso: null, lagDays: null, bMapping: mappingB }))
                 : (matchedPairs ?? []).slice(0, showCount)
               ).map((item, i) => {
                 const aRow = item.a;
                 const bRow = item.b;
+                const bm = (item as any).bMapping as ColumnMappingB | undefined;
                 const name = aRow.callee_name || aRow.name || '';
                 const bucket = aRow._bucket;
-                const amountStr = bRow && mappingB.amount ? (bRow[mappingB.amount] ?? '') : '';
+                // Read amount / paid using the matched pair's own bMapping —
+                // each B source can have different amount/paid column names.
+                const amountCol = bm?.amount;
+                const paidCol = bm?.amountPaid;
+                const amountStr = bRow && amountCol ? (bRow[amountCol] ?? '') : '';
                 const amountNum = parseFloat(amountStr);
-                const paidStr   = bRow && mappingB.amountPaid ? (bRow[mappingB.amountPaid] ?? '') : '';
+                const paidStr   = bRow && paidCol ? (bRow[paidCol] ?? '') : '';
                 const paidNum   = parseFloat(paidStr);
                 return (
                   <tr key={i} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
@@ -2414,10 +2674,10 @@ function ResultDetailSection({
                       ) : <span className="text-surface-300">—</span>}
                     </td>
                     {/* A extras — Vendor / Campaign / Agent or any custom
-                        column the user mapped from File A. Same truncation
-                        rule as B extras to keep long values from blowing
-                        out the row. */}
-                    {mappingA.extras.map((e, ix) => {
+                        column the user mapped. Cells read directly from aRow,
+                        so the column needs to exist in that source's data.
+                        Sources without that column show — for that cell. */}
+                    {aExtras.map((e, ix) => {
                       const val = aRow[e.column] ?? '';
                       return (
                         <td key={`ca-${i}-${ix}`} className="py-2 px-3 text-surface-700 max-w-[140px] truncate" title={val}>
@@ -2452,11 +2712,14 @@ function ResultDetailSection({
                           : (paidStr || <span className="text-surface-300">—</span>)}
                       </td>
                     )}
-                    {/* Display extras — Product, Source, or any custom column
-                        the user added. Truncated visually with overflow-hidden
-                        so a long URL or paragraph doesn't blow out the row. */}
-                    {!isUnmatched && mappingB.extras.map((e, ix) => {
-                      const val = bRow ? (bRow[e.column] ?? '') : '';
+                    {/* B display extras — same idea as A's: read from bRow
+                        for whatever column maps to this label in this pair's
+                        bMapping. Falls back to the union-level extra's column
+                        name if this pair's mapping doesn't have a match. */}
+                    {!isUnmatched && bExtras.map((e, ix) => {
+                      const colInPairMapping = bm?.extras.find(x => x.label === e.label)?.column;
+                      const col = colInPairMapping ?? e.column;
+                      const val = bRow ? (bRow[col] ?? '') : '';
                       return (
                         <td key={`cb-${i}-${ix}`} className="py-2 px-3 text-surface-700 max-w-[140px] truncate" title={val}>
                           {val || <span className="text-surface-300">—</span>}
