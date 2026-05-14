@@ -4,7 +4,7 @@ import { Fragment, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   ChevronDown, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight,
-  CalendarDays, Download,
+  CalendarDays, Download, Loader2,
 } from 'lucide-react';
 import { api, fmt } from '@/lib/api';
 import type { DodLeadCampaign, Filters } from '@/types';
@@ -44,6 +44,63 @@ const PAGE_SIZES = [10, 25, 50, 100];
 // date view or a campaign_id in campaign view. Single primitive-keyed Set
 // keeps add/has/delete cheap.
 const cellKey = (rowId: string, bucket: BucketKey) => `${rowId}|${bucket}`;
+
+// ---- CSV row helpers (used by export merge) ----
+// Tiny RFC 4180-aware parsers. We only need to split the header into column
+// names and to extract a single cell by index from a data row — full row
+// parsing isn't needed because we're concatenating rows verbatim into the
+// merged file, not transforming them.
+
+function parseCsvHeader(line: string): string[] {
+  // Header is almost always unquoted simple names (mobile_number, etc.).
+  // Still handle quotes defensively in case the schema adds a name with a
+  // comma or quote in it later.
+  const cols: string[] = [];
+  let cur = '';
+  let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; continue; }
+      if (ch === '"') { inQ = false; continue; }
+      cur += ch;
+    } else {
+      if (ch === '"') { inQ = true; continue; }
+      if (ch === ',') { cols.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+  }
+  cols.push(cur);
+  return cols;
+}
+
+// Extract just the Nth cell from a CSV line. Cheaper than full parsing
+// because we early-return once we hit column `idx`. Quote-aware so a
+// comma inside a quoted field (the result_json column has these) doesn't
+// shift indices.
+function extractCsvCell(line: string, idx: number): string {
+  let cur = '';
+  let inQ = false;
+  let col = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; continue; }
+      if (ch === '"') { inQ = false; continue; }
+      cur += ch;
+    } else {
+      if (ch === '"') { inQ = true; continue; }
+      if (ch === ',') {
+        if (col === idx) return cur;
+        col++;
+        cur = '';
+        continue;
+      }
+      cur += ch;
+    }
+  }
+  return col === idx ? cur : '';
+}
 
 // Format an IST ISO date ("2026-05-05") for display.
 function formatDate(isoDate: string): string {
@@ -100,6 +157,18 @@ export default function DodLeadsPage() {
   // all" is checked when ALL 4 buckets for that row are in the set; same
   // for column "select all" across all visible rows.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  // Export state. Tracks whether a download is currently being assembled and
+  // how far along (n of N jobs fetched) so the user gets feedback during the
+  // few seconds it takes to fetch many cells. Replaces the prior approach of
+  // triggering N separate <a download> clicks — browsers block sequential
+  // automated downloads aggressively (Chrome shows a "multiple downloads"
+  // prompt that's easy to miss; if dismissed all but the first are dropped).
+  const [exportState, setExportState] = useState<
+    | { kind: 'idle' }
+    | { kind: 'running'; done: number; total: number }
+    | { kind: 'error'; message: string }
+  >({ kind: 'idle' });
 
   const dod = useQuery({ queryKey: ['dod-leads'], queryFn: () => api.dodLeads() });
   const allDays = dod.data?.days ?? [];
@@ -242,32 +311,25 @@ export default function DodLeadsPage() {
   };
   const clearSelection = () => setSelected(new Set());
 
-  // CSV file count for the helper text. Mirrors the consolidation logic
-  // in handleExport so the count matches what actually downloads.
-  const csvFileCount = useMemo(() => {
-    if (selected.size === 0) return 0;
-    let n = 0;
-    for (const b of BUCKETS) {
-      if (isColumnFullySelected(b.key)) {
-        n += view === 'date' ? 1 : campaignRows.length;
-      } else {
-        for (const r of allRows) {
-          if (selected.has(cellKey(rowId(r), b.key))) n += 1;
-        }
-      }
-    }
-    return n;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, allRows, view, campaignRows]);
-
   // ---- Export ----
-  // For each ticked cell, fire a /calls.csv download with the matching
-  // filter. Whole-column ticks consolidate to a single range-wide download
-  // (date view) or one per campaign (campaign view) — anything narrower
-  // becomes per-cell downloads. Staggered 350ms so browsers don't
-  // suppress sequential programmatic downloads.
-  const handleExport = () => {
-    if (selected.size === 0) return;
+  // For each ticked cell, fetch the matching /calls.csv slice from the
+  // backend in parallel, merge them client-side (header once, rows dedup'd
+  // by mobile_number), and trigger ONE download.
+  //
+  // Why this design: the previous version did N separate <a download> clicks
+  // staggered 350ms. Browsers (especially Chrome) block sequential automated
+  // downloads — only the first succeeded, the rest were silently dropped
+  // unless the user accepted a "this site wants to download multiple files"
+  // permission prompt. A merged CSV is also what BDs actually want anyway
+  // (one master sheet to VLOOKUP against).
+  //
+  // Whole-column ticks consolidate to a single range-wide download (date
+  // view) or one per campaign (campaign view) — anything narrower becomes
+  // per-cell jobs. The result is deduplicated by mobile_number since the
+  // same lead can appear under multiple ticked cells (e.g. when both a row
+  // and a column passing through that row are selected).
+  const handleExport = async () => {
+    if (selected.size === 0 || exportState.kind === 'running') return;
 
     type ExportJob = { filters: Filters; bucket: BucketKey; label: string };
     const jobs: ExportJob[] = [];
@@ -276,8 +338,6 @@ export default function DodLeadsPage() {
 
     for (const b of BUCKETS) {
       if (isColumnFullySelected(b.key)) {
-        // Whole column → one job per campaign in campaign view, one job
-        // total in date view.
         if (view === 'date') {
           jobs.push({
             filters: { start: rangeStart, end: rangeEnd, vendor_ids: [], campaign_ids: [] },
@@ -295,8 +355,6 @@ export default function DodLeadsPage() {
         }
         continue;
       }
-
-      // Partial column → individually selected cells only
       for (const r of allRows) {
         const id = rowId(r);
         if (!selected.has(cellKey(id, b.key))) continue;
@@ -321,17 +379,95 @@ export default function DodLeadsPage() {
       }
     }
 
-    jobs.forEach((job, i) => {
-      setTimeout(() => {
+    if (jobs.length === 0) return;
+
+    setExportState({ kind: 'running', done: 0, total: jobs.length });
+    let completed = 0;
+
+    try {
+      // Fetch all jobs in parallel. Each one returns the CSV text from
+      // /api/export/calls.csv with the right filters. We tick the progress
+      // counter as each promise resolves so the UI feels alive.
+      const results = await Promise.all(jobs.map(async (job) => {
         const url = api.exportCallsUrl(job.filters, { funnel_stage: job.bucket });
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `dod_leads_${job.bucket}_${job.label}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }, i * 350);
-    });
+        const resp = await fetch(url, { credentials: 'include' });
+        if (!resp.ok) {
+          throw new Error(`Job for ${job.bucket}/${job.label} failed: HTTP ${resp.status}`);
+        }
+        const text = await resp.text();
+        completed += 1;
+        setExportState({ kind: 'running', done: completed, total: jobs.length });
+        return { job, text };
+      }));
+
+      // Merge. The backend already returns one row per mobile_number per
+      // bucket, but the same phone can appear under multiple ticked cells
+      // (e.g. row select + column select intersecting). Dedup by phone keeps
+      // the first occurrence we see; this also means the user gets a clean
+      // master sheet without manual VLOOKUP cleanup.
+      let header: string | null = null;
+      const seen = new Set<string>();
+      const mergedRows: string[] = [];
+      let phoneColIdx = -1;
+      let bucketColIdx = -1;
+
+      for (const { job, text } of results) {
+        // Normalize line endings before splitting. The backend writes
+        // \r\n (RFC 4180) but we don't want blank rows from a trailing newline.
+        const lines = text.replace(/\r\n/g, '\n').split('\n').filter(l => l.length > 0);
+        if (lines.length === 0) continue;
+
+        if (header === null) {
+          header = lines[0];
+          // Find mobile_number + bucket col positions. Bucket column
+          // doesn't exist in the source CSV — we add it as a new column
+          // so the user can see which bucket each row came from in the
+          // merged sheet.
+          const cols = parseCsvHeader(header);
+          phoneColIdx = cols.indexOf('mobile_number');
+          if (phoneColIdx < 0) {
+            // Fallback — header looks unexpected; bail with a clear error
+            throw new Error('Export CSV is missing mobile_number column — unexpected schema');
+          }
+          bucketColIdx = cols.length; // appended at end
+          header = `${header},source_bucket`;
+        }
+        // Else: skip the duplicate header from this CSV — we already have it.
+
+        for (let i = 1; i < lines.length; i++) {
+          const phone = extractCsvCell(lines[i], phoneColIdx);
+          if (phone && seen.has(phone)) continue;
+          if (phone) seen.add(phone);
+          // Append the bucket label to the row so the user can see the
+          // origin of each lead in the merged sheet.
+          mergedRows.push(`${lines[i]},${job.bucket}`);
+        }
+      }
+
+      if (!header || mergedRows.length === 0) {
+        throw new Error('Export returned no rows. Try a wider date range or different cells.');
+      }
+
+      const blob = new Blob([header + '\n' + mergedRows.join('\n')], { type: 'text/csv;charset=utf-8' });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      // Filename encodes scope + lead count + timestamp so multiple exports
+      // in a session don't collide on disk.
+      const ts = new Date().toISOString().slice(0, 16).replace(/[:T-]/g, '');
+      a.download = `leads_${mergedRows.length}_${ts}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke after a moment — too soon and Safari aborts the download.
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+
+      setExportState({ kind: 'idle' });
+    } catch (e: any) {
+      setExportState({ kind: 'error', message: e?.message || 'Export failed' });
+      // Auto-clear after a few seconds so the button becomes usable again
+      setTimeout(() => setExportState({ kind: 'idle' }), 5000);
+    }
   };
 
   // ---- View / range / page-size changes reset paging + selection ----
@@ -429,18 +565,36 @@ export default function DodLeadsPage() {
         <button
           type="button"
           onClick={handleExport}
-          disabled={selected.size === 0 || filteredDays.length === 0}
+          disabled={selected.size === 0 || filteredDays.length === 0 || exportState.kind === 'running'}
           className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-surface-300 bg-white text-brand-navy font-medium hover:border-brand-pink hover:text-brand-pink transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-surface-300 disabled:hover:text-brand-navy"
-          title={selected.size === 0
-            ? 'Tick at least one cell, row, or column'
-            : `Download ${csvFileCount} CSV file(s) containing ${fmt.int(selectedCount)} leads`}
+          title={
+            selected.size === 0
+              ? 'Tick at least one cell, row, or column'
+              : exportState.kind === 'error'
+                ? exportState.message
+                : `Download a single merged CSV containing ${fmt.int(selectedCount)} leads (deduped by phone)`
+          }
         >
-          <Download size={13} />
-          Export CSV
-          {selectedCount > 0 && (
-            <span className="ml-1 text-[10px] text-surface-500 font-normal">
-              ({fmt.int(selectedCount)})
-            </span>
+          {exportState.kind === 'running' ? (
+            <>
+              <Loader2 size={13} className="animate-spin" />
+              Fetching… {exportState.done}/{exportState.total}
+            </>
+          ) : exportState.kind === 'error' ? (
+            <>
+              <Download size={13} className="text-red-500" />
+              <span className="text-red-600">Failed — retry</span>
+            </>
+          ) : (
+            <>
+              <Download size={13} />
+              Export CSV
+              {selectedCount > 0 && (
+                <span className="ml-1 text-[10px] text-surface-500 font-normal">
+                  ({fmt.int(selectedCount)})
+                </span>
+              )}
+            </>
           )}
         </button>
       </div>
@@ -672,14 +826,14 @@ export default function DodLeadsPage() {
                   <td></td>
                   <td colSpan={6} className="px-3 pb-2.5 pt-0 text-[11px] text-surface-500 italic">
                     {selected.size === 0
-                      ? 'Tick any cell, row, or column — Export CSV will download just those leads'
+                      ? 'Tick any cell, row, or column — Export CSV downloads one merged file'
                       : (
                         <>
                           <span className="font-medium not-italic text-surface-700">
                             {fmt.int(selectedCount)} leads selected
                           </span>
                           <span className="text-surface-400">
-                            {' '}({selected.size} {selected.size === 1 ? 'cell' : 'cells'}, {csvFileCount} CSV file{csvFileCount === 1 ? '' : 's'})
+                            {' '}({selected.size} {selected.size === 1 ? 'cell' : 'cells'} → 1 merged CSV, deduped by phone)
                           </span>
                         </>
                       )}
@@ -764,8 +918,10 @@ export default function DodLeadsPage() {
         connected leads). Unreached leads (still being retried, voicemail, hard fail) are
         NOT in these four columns — see Total leads to gauge what's still pending. Numbers
         click-through to Call Logs with matching filters pre-applied. Export CSV downloads
-        one file per ticked cell (whole-column ticks consolidate into a single range-wide
-        file) — merge them into your master sheet via VLOOKUP on mobile_number.
+        ONE merged file containing every lead from every ticked cell, deduplicated by
+        mobile_number. A <code>source_bucket</code> column is appended so you can see
+        which bucket each lead came from. Drop straight into your master sheet via
+        VLOOKUP on mobile_number — no manual file-merging needed.
       </div>
     </div>
   );
