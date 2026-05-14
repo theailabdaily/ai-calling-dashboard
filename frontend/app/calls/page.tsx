@@ -208,6 +208,8 @@ function CallsPageInner() {
         <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">Call logs</h1>
         <p className="text-xs md:text-sm text-surface-500 mt-1">
           QA the AI agent. Search by phone or name, filter by outcome, tap any row to inspect.
+          Date range filters by when each call ended (or by upload time for never-dialed rows) —
+          matches the Leads page.
         </p>
       </header>
 
