@@ -211,6 +211,104 @@ function computeBucket(row: Record<string, string>): string {
   return 'no_intent';
 }
 
+// ---- XLSX / XLS parser (lazy-loaded SheetJS from CDN) ----------------------
+
+// SheetJS pulled at runtime so the main bundle stays slim. Cached after first
+// load — second upload is instant. CDN script tag pattern keeps Next.js
+// happy (it would otherwise try to resolve `xlsx` at build time and fail).
+let xlsxLibPromise: Promise<any> | null = null;
+function loadXLSXLib(): Promise<any> {
+  if (xlsxLibPromise) return xlsxLibPromise;
+  if (typeof window !== 'undefined' && (window as any).XLSX) {
+    xlsxLibPromise = Promise.resolve((window as any).XLSX);
+    return xlsxLibPromise;
+  }
+  xlsxLibPromise = new Promise((resolve, reject) => {
+    if (typeof document === 'undefined') {
+      reject(new Error('SSR cannot load XLSX library'));
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js';
+    script.async = true;
+    script.onload = () => {
+      const XLSX = (window as any).XLSX;
+      if (XLSX) resolve(XLSX);
+      else reject(new Error('XLSX library loaded but global is missing'));
+    };
+    script.onerror = () => reject(new Error('Failed to load XLSX library from CDN'));
+    document.head.appendChild(script);
+  });
+  return xlsxLibPromise;
+}
+
+// Parse a workbook ArrayBuffer. Takes the first sheet by default (most user
+// uploads are single-sheet exports). All cells stringified — matches what
+// parseCSV returns, so downstream filtering / phone / date logic works
+// unchanged. Empty header cells get auto-named "column_N" so the picker
+// doesn't show blank options.
+async function parseXLSX(buffer: ArrayBuffer): Promise<{ columns: string[]; rows: Record<string, string>[] }> {
+  const XLSX = await loadXLSXLib();
+  const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return { columns: [], rows: [] };
+  const sheet = workbook.Sheets[sheetName];
+  // header:1 returns array-of-arrays. Easier to dedup / clean headers than
+  // letting SheetJS auto-derive object keys from the first row.
+  const aoa: any[][] = XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    raw: false,        // coerce every cell to string
+    defval: '',        // fill blanks with empty string
+    blankrows: false,  // skip fully-empty rows
+  });
+  if (aoa.length === 0) return { columns: [], rows: [] };
+
+  const rawHeaders = aoa[0].map(c => (c == null ? '' : String(c).trim()));
+  const columns: string[] = [];
+  const seen = new Map<string, number>();
+  for (let i = 0; i < rawHeaders.length; i++) {
+    let name = rawHeaders[i] || `column_${i + 1}`;
+    // Disambiguate duplicate column names
+    if (seen.has(name)) {
+      const count = (seen.get(name) ?? 1) + 1;
+      seen.set(name, count);
+      name = `${name}_${count}`;
+    } else {
+      seen.set(name, 1);
+    }
+    columns.push(name);
+  }
+
+  const rows: Record<string, string>[] = [];
+  for (let r = 1; r < aoa.length; r++) {
+    const raw = aoa[r];
+    const obj: Record<string, string> = {};
+    let hasValue = false;
+    for (let c = 0; c < columns.length; c++) {
+      const v = raw[c];
+      const s = v == null ? '' : String(v).trim();
+      obj[columns[c]] = s;
+      if (s) hasValue = true;
+    }
+    if (hasValue) rows.push(obj);
+  }
+  return { columns, rows };
+}
+
+// Dispatcher — picks the right parser by file extension. Falls back to CSV
+// for unknown types since text mode handles both ".tsv" and weird .txt
+// exports.
+async function parseFile(file: File): Promise<{ columns: string[]; rows: Record<string, string>[] }> {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.xlsx') || name.endsWith('.xls') || name.endsWith('.xlsm') || name.endsWith('.xlsb')) {
+    const buffer = await file.arrayBuffer();
+    return parseXLSX(buffer);
+  }
+  // .csv, .tsv, or anything else — text mode
+  const text = await file.text();
+  return parseCSV(text);
+}
+
 // ---- Phone normalization (Indian focus) ------------------------------------
 
 function normalizePhone(raw: string): string {
@@ -785,10 +883,12 @@ export default function LeadAttributionPage() {
     async (which: 'A' | 'B', file: File) => {
       setParseError(null);
       try {
-        const text = await file.text();
-        const parsed = parseCSV(text);
+        // parseFile auto-detects CSV vs XLSX from extension. XLSX support is
+        // lazy-loaded from CDN on first use — first upload may take ~1s while
+        // SheetJS downloads, subsequent uploads are instant.
+        const parsed = await parseFile(file);
         if (parsed.columns.length === 0) {
-          setParseError(`${file.name}: no columns detected. Is it a valid CSV?`);
+          setParseError(`${file.name}: no columns detected. Is the file empty?`);
           return;
         }
         const data: CSVData = {
@@ -929,7 +1029,8 @@ export default function LeadAttributionPage() {
         <p className="text-xs md:text-sm text-surface-500 mt-1">
           Check which leads from this dashboard became paid users in an external file.
           Pull leads directly from the dashboard (default) or upload a custom list, then
-          upload your payments / outcomes CSV. Filters apply before matching.
+          upload your payments / outcomes file. Accepts CSV, XLSX, and XLS. Filters apply
+          before matching.
         </p>
       </header>
 
@@ -1002,7 +1103,7 @@ export default function LeadAttributionPage() {
                 <LoadedFileChip data={fileA} onClear={() => clearFile('A')} />
               ) : (
                 <UploadDropZone
-                  label="Drop leads CSV"
+                  label="Drop leads file"
                   sublabel="any list of leads with a phone column"
                   onLoad={f => handleFileLoad('A', f)}
                 />
@@ -1020,7 +1121,7 @@ export default function LeadAttributionPage() {
               <LoadedFileChip data={fileB} onClear={() => clearFile('B')} />
             ) : (
               <UploadDropZone
-                label="Drop payments CSV"
+                label="Drop payments file"
                 sublabel="CRM transactions, signups, etc."
                 onLoad={f => handleFileLoad('B', f)}
               />
@@ -1666,7 +1767,7 @@ function UploadDropZone({
     >
       <input
         type="file"
-        accept=".csv,text/csv"
+        accept=".csv,.tsv,.xlsx,.xls,.xlsm,.xlsb,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         className="hidden"
         onChange={e => {
           const f = e.target.files?.[0];
@@ -1676,7 +1777,7 @@ function UploadDropZone({
       <Upload size={16} className="mx-auto text-surface-400 mb-1" />
       <div className="text-xs font-medium text-brand-navy">{label}</div>
       <div className="text-[10px] text-surface-500 mt-0.5">{sublabel}</div>
-      <div className="text-[10px] text-surface-400 mt-1">Drop or click to browse</div>
+      <div className="text-[10px] text-surface-400 mt-1">Drop or click · CSV / XLSX / XLS</div>
     </label>
   );
 }
