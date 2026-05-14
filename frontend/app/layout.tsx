@@ -9,6 +9,22 @@ import MainContent from '@/components/layout/main-content';
 export const metadata: Metadata = {
   title: 'AI Calling Analytics — Testbook Supercoaching',
   description: 'Unified analytics across AI calling vendors',
+  // Next.js auto-emits the right <link rel="..."> tags from this block.
+  // Files live in /frontend/public so they're served at the site root.
+  // SVG favicon scales to any DPI without bloating the bundle; PNG and
+  // apple-touch are fallbacks for browsers that don't support SVG favicons
+  // (Safari <13, older Edge).
+  icons: {
+    icon: [
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+      { url: '/favicon-32.png', sizes: '32x32', type: 'image/png' },
+      { url: '/favicon-16.png', sizes: '16x16', type: 'image/png' },
+    ],
+    apple: [
+      { url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' },
+    ],
+    shortcut: '/favicon.svg',
+  },
 };
 
 export const viewport: Viewport = {
