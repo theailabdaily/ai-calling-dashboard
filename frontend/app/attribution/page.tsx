@@ -80,10 +80,17 @@ type MatchedPair = {
   bDateIso: string | null;
   aDateIso: string | null;
   lagDays: number | null;
+  // Mapping that was used to read the A row. Carries the source-specific
+  // phone/date column names. Used by duplicate detection and per-source pivots.
+  aMapping: ColumnMappingA;
   // Mapping that was used to read the B row. Lets the preview table /
   // download read amount / paid / extras with the correct source-specific
   // column names rather than assuming a single global mappingB.
   bMapping: ColumnMappingB;
+  // Source labels for pivot views. Identifies which A file / B file the
+  // matched rows came from (e.g. "Dashboard", "File A.2 · prospects.csv").
+  aSourceLabel: string;
+  bSourceLabel: string;
 };
 
 type Results = {
@@ -97,6 +104,10 @@ type Results = {
   attributedPairs: MatchedPair[];
   preExistingPairs: MatchedPair[];
   unmatchedRows: Record<string, string>[];
+  // Parallel to unmatchedRows. Carries the source mapping + label for each
+  // unmatched row so the duplicate detector can read the right phone column
+  // and attribute the duplicate to the right A source.
+  unmatchedSources: Array<{ row: Record<string, string>; mapping: ColumnMappingA; label: string }>;
   ranAt: number;
 };
 
@@ -592,8 +603,8 @@ function dashboardFilenameFor(rangeLabel: string, vCount: number, cCount: number
 // Each A or B source feeds into the algorithm as a (rows, mapping) pair.
 // The algorithm reads phone/date/amount/etc from `mapping`, so files with
 // different column names (mobile vs phone, TxnOn vs created_at) still work.
-type SourceWithMappingA = { rows: Record<string, string>[]; mapping: ColumnMappingA };
-type SourceWithMappingB = { rows: Record<string, string>[]; mapping: ColumnMappingB };
+type SourceWithMappingA = { rows: Record<string, string>[]; mapping: ColumnMappingA; label: string };
+type SourceWithMappingB = { rows: Record<string, string>[]; mapping: ColumnMappingB; label: string };
 
 type RunInput = {
   sourcesA: SourceWithMappingA[];
@@ -644,12 +655,13 @@ function runAttribution(input: RunInput): Results {
     amount: number;
     amountPaid: number;
     mapping: ColumnMappingB;
+    sourceLabel: string;
   };
 
   const bIndex = new Map<string, IndexedB[]>();
   let totalBRowsKept = 0;
   for (const src of sourcesB) {
-    const { rows, mapping } = src;
+    const { rows, mapping, label } = src;
     for (const row of rows) {
       if (!passesB(row)) continue;
       totalBRowsKept++;
@@ -661,6 +673,7 @@ function runAttribution(input: RunInput): Results {
         amount: mapping.amount ? (parseFloat(row[mapping.amount]) || 0) : 0,
         amountPaid: mapping.amountPaid ? (parseFloat(row[mapping.amountPaid]) || 0) : 0,
         mapping,
+        sourceLabel: label,
       };
       if (!bIndex.has(phone)) bIndex.set(phone, []);
       bIndex.get(phone)!.push(entry);
@@ -674,23 +687,29 @@ function runAttribution(input: RunInput): Results {
   const attributedPairs: MatchedPair[] = [];
   const preExistingPairs: MatchedPair[] = [];
   const unmatchedRows: Record<string, string>[] = [];
+  const unmatchedSources: Array<{ row: Record<string, string>; mapping: ColumnMappingA; label: string }> = [];
   let revenueTotal = 0;
   let revenuePaid = 0;
   let totalARowsKept = 0;
 
+  const pushUnmatched = (row: Record<string, string>, mapping: ColumnMappingA, label: string) => {
+    unmatchedRows.push(row);
+    unmatchedSources.push({ row, mapping, label });
+  };
+
   for (const src of sourcesA) {
-    const { rows, mapping } = src;
+    const { rows, mapping, label: aLabel } = src;
     for (const aRow of rows) {
       if (!passesA(aRow)) continue;
       totalARowsKept++;
       const aPhone = normalizePhone(aRow[mapping.phone] ?? '');
       const aDateIso = parseDate(aRow[mapping.date] ?? '');
 
-      if (!aPhone) { unmatchedRows.push(aRow); continue; }
+      if (!aPhone) { pushUnmatched(aRow, mapping, aLabel); continue; }
 
       const candidates = bIndex.get(aPhone);
       if (!candidates || candidates.length === 0) {
-        unmatchedRows.push(aRow);
+        pushUnmatched(aRow, mapping, aLabel);
         continue;
       }
 
@@ -709,7 +728,10 @@ function runAttribution(input: RunInput): Results {
           a: aRow, b: matched.row,
           bDateIso: matched.bDateIso, aDateIso,
           lagDays: daysBetween(aDateIso, matched.bDateIso),
+          aMapping: mapping,
           bMapping: matched.mapping,
+          aSourceLabel: aLabel,
+          bSourceLabel: matched.sourceLabel,
         });
         revenueTotal += matched.amount;
         revenuePaid  += matched.amountPaid;
@@ -719,10 +741,13 @@ function runAttribution(input: RunInput): Results {
           a: aRow, b: b.row,
           bDateIso: b.bDateIso, aDateIso,
           lagDays: daysBetween(aDateIso, b.bDateIso),
+          aMapping: mapping,
           bMapping: b.mapping,
+          aSourceLabel: aLabel,
+          bSourceLabel: b.sourceLabel,
         });
       } else {
-        unmatchedRows.push(aRow);
+        pushUnmatched(aRow, mapping, aLabel);
       }
     }
   }
@@ -735,7 +760,7 @@ function runAttribution(input: RunInput): Results {
     attributed: attributedPairs.length,
     unmatched: unmatchedRows.length,
     revenueTotal, revenuePaid,
-    attributedPairs, preExistingPairs, unmatchedRows,
+    attributedPairs, preExistingPairs, unmatchedRows, unmatchedSources,
     ranAt: Date.now(),
   };
 }
@@ -1142,21 +1167,36 @@ export default function LeadAttributionPage() {
   // their stored order.
   const sourcesA: SourceWithMappingA[] = useMemo(() => {
     const out: SourceWithMappingA[] = [];
+    const hasMultiple = (dashboardData ? 1 : 0) + uploadsA.length > 1;
     if (dashboardData && mappingDashboardA) {
-      out.push({ rows: dashboardData.rows, mapping: mappingDashboardA });
+      out.push({
+        rows: dashboardData.rows,
+        mapping: mappingDashboardA,
+        label: hasMultiple ? 'A.1 · Dashboard' : 'Dashboard',
+      });
     }
     for (let i = 0; i < uploadsA.length; i++) {
       const m = mappingsUploadsA[i];
-      if (m) out.push({ rows: uploadsA[i].rows, mapping: m });
+      if (!m) continue;
+      const idx = dashboardData ? i + 2 : i + 1;
+      const label = hasMultiple
+        ? `A.${idx} · ${uploadsA[i].filename}`
+        : uploadsA[i].filename;
+      out.push({ rows: uploadsA[i].rows, mapping: m, label });
     }
     return out;
   }, [dashboardData, mappingDashboardA, uploadsA, mappingsUploadsA]);
 
   const sourcesB: SourceWithMappingB[] = useMemo(() => {
     const out: SourceWithMappingB[] = [];
+    const hasMultiple = uploadsB.length > 1;
     for (let i = 0; i < uploadsB.length; i++) {
       const m = mappingsB[i];
-      if (m) out.push({ rows: uploadsB[i].rows, mapping: m });
+      if (!m) continue;
+      const label = hasMultiple
+        ? `B.${i + 1} · ${uploadsB[i].filename}`
+        : uploadsB[i].filename;
+      out.push({ rows: uploadsB[i].rows, mapping: m, label });
     }
     return out;
   }, [uploadsB, mappingsB]);
@@ -1515,6 +1555,8 @@ export default function LeadAttributionPage() {
             hasPaid={mappingsB.some(m => !!m.amountPaid)}
             aExtras={allAExtras}
             bExtras={allBExtras}
+            aSourceCount={sourcesA.length}
+            bSourceCount={sourcesB.length}
           />
         </section>
       )}
@@ -2431,7 +2473,7 @@ function CustomFilterRow({
 }
 
 function ResultsBlock({
-  results, mappingA, mappingB, hasAmount, hasPaid, aExtras, bExtras,
+  results, mappingA, mappingB, hasAmount, hasPaid, aExtras, bExtras, aSourceCount, bSourceCount,
 }: {
   results: Results;
   mappingA: ColumnMappingA;
@@ -2440,6 +2482,8 @@ function ResultsBlock({
   hasPaid: boolean;
   aExtras: ExtraMapping[];
   bExtras: ExtraMapping[];
+  aSourceCount: number;
+  bSourceCount: number;
 }) {
   const { totalA, keyMatched, preExisting, attributed, unmatched, revenueTotal, revenuePaid } = results;
   return (
@@ -2496,6 +2540,29 @@ function ResultsBlock({
           )}
         </div>
       )}
+
+      {/* Product pivot — only renders when any B source has Product mapped.
+          Aggregates attributed matches by product name (read from each pair's
+          own bMapping, so different B files can use different product column
+          names). Sortable by clicking any column header. */}
+      <ProductPivot pairs={results.attributedPairs} bExtras={bExtras} />
+
+      {/* Source pivot — only renders when 2+ sources exist on either side.
+          Shows which A file converted what and which B file accounted for
+          what revenue. Useful for multi-file workflows. */}
+      <SourcePivot
+        pairs={results.attributedPairs}
+        aSourceCount={aSourceCount}
+        bSourceCount={bSourceCount}
+      />
+
+      {/* Duplicate phones — warn the user if their A sources share leads.
+          The algorithm uses the first occurrence by phone, so duplicates are
+          silently dropped from the match. This card surfaces them. */}
+      <DuplicatesCard
+        pairs={[...results.attributedPairs, ...results.preExistingPairs]}
+        unmatchedSources={results.unmatchedSources}
+      />
 
       {/* Inline previews — expandable cards that let the user spot-check
           matches without downloading. Each section is independently
@@ -2557,14 +2624,404 @@ function ResultsBlock({
           <Download size={12} /> Unmatched ({fmtInt(results.unmatchedRows.length)})
         </button>
       </div>
+
     </>
   );
 }
 
-// Expandable preview card showing the rows behind one results bucket
-// (Attributed / Pre-existing / Unmatched). Lets the user spot-check
-// matches inline before deciding to download the full list. Paginated 25
-// rows per page so the DOM doesn't explode on large datasets.
+// Product pivot — aggregates attributed matches by product, showing leads,
+// revenue total/paid, and avg amount per product. Sortable. Self-suppressing
+// when no B source has Product mapped or when the resulting table is empty.
+// Reads product per match via each pair's own bMapping so multi-source B
+// with different product column names works correctly.
+type ProductPivotSort = 'leads' | 'revenue' | 'paid' | 'avg' | 'product';
+function ProductPivot({
+  pairs, bExtras,
+}: {
+  pairs: MatchedPair[];
+  bExtras: ExtraMapping[];
+}) {
+  const hasProductMapping = bExtras.some(e => e.label === 'Product');
+  const [sortBy, setSortBy] = useState<ProductPivotSort>('leads');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const [expanded, setExpanded] = useState(true);
+
+  // Aggregate pairs into per-product rows. Empty product values get grouped
+  // under "(no product)" so the user sees how many attributed matches lacked
+  // a product tag — useful for spotting CRM data quality issues.
+  type PivotRow = {
+    product: string;
+    leads: number;
+    revenue: number;
+    paid: number;
+  };
+  const rows: PivotRow[] = useMemo(() => {
+    if (!hasProductMapping) return [];
+    const acc = new Map<string, PivotRow>();
+    for (const p of pairs) {
+      const productCol = p.bMapping.extras.find(e => e.label === 'Product')?.column;
+      if (!productCol) continue; // This pair's B source has no Product mapped
+      const product = (p.b[productCol] ?? '').trim() || '(no product)';
+      const amountCol = p.bMapping.amount;
+      const paidCol   = p.bMapping.amountPaid;
+      const amount = amountCol ? (parseFloat(p.b[amountCol]) || 0) : 0;
+      const paid   = paidCol   ? (parseFloat(p.b[paidCol])   || 0) : 0;
+      const existing = acc.get(product);
+      if (existing) {
+        existing.leads   += 1;
+        existing.revenue += amount;
+        existing.paid    += paid;
+      } else {
+        acc.set(product, { product, leads: 1, revenue: amount, paid });
+      }
+    }
+    return Array.from(acc.values());
+  }, [pairs, hasProductMapping]);
+
+  const sortedRows = useMemo(() => {
+    const out = [...rows];
+    out.sort((a, b) => {
+      let cmp = 0;
+      if      (sortBy === 'product') cmp = a.product.localeCompare(b.product);
+      else if (sortBy === 'leads')   cmp = a.leads - b.leads;
+      else if (sortBy === 'revenue') cmp = a.revenue - b.revenue;
+      else if (sortBy === 'paid')    cmp = a.paid - b.paid;
+      else if (sortBy === 'avg')     cmp = (a.leads ? a.revenue / a.leads : 0) - (b.leads ? b.revenue / b.leads : 0);
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+    return out;
+  }, [rows, sortBy, sortDir]);
+
+  // Totals row at the bottom — sums across products. Useful for spot-check
+  // that the pivot adds up to the headline revenue numbers from KPI strip.
+  const totals = useMemo(() => {
+    return rows.reduce((acc, r) => ({
+      leads: acc.leads + r.leads,
+      revenue: acc.revenue + r.revenue,
+      paid: acc.paid + r.paid,
+    }), { leads: 0, revenue: 0, paid: 0 });
+  }, [rows]);
+
+  if (!hasProductMapping) return null;
+  if (rows.length === 0) return null;
+
+  // Detect whether ANY product has non-zero amounts. If revenue is all-zeros
+  // we hide those columns to keep the table tight (e.g. B file has Product
+  // mapped but no Amount).
+  const anyRevenue = rows.some(r => r.revenue > 0);
+  const anyPaid    = rows.some(r => r.paid > 0);
+
+  const flip = (col: ProductPivotSort) => {
+    if (sortBy === col) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortBy(col);
+      // Sensible defaults — product sorts asc by name, numeric sorts desc
+      setSortDir(col === 'product' ? 'asc' : 'desc');
+    }
+  };
+  const SortHead = ({ label, col, align = 'left' }: { label: string; col: ProductPivotSort; align?: 'left' | 'right' }) => (
+    <th
+      onClick={() => flip(col)}
+      className={`py-2 px-3 whitespace-nowrap cursor-pointer hover:text-brand-pink select-none ${align === 'right' ? 'text-right' : 'text-left'}`}
+    >
+      {label}
+      {sortBy === col && <span className="ml-1 text-brand-pink">{sortDir === 'asc' ? '↑' : '↓'}</span>}
+    </th>
+  );
+
+  return (
+    <div className="card mt-3 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setExpanded(e => !e)}
+        className="w-full px-3 py-2.5 flex items-center justify-between hover:bg-surface-50"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-surface-500">Product pivot</span>
+          <span className="text-[11px] bg-brand-pink/10 text-brand-pink px-1.5 py-0.5 rounded font-medium">
+            {fmtInt(rows.length)} {rows.length === 1 ? 'product' : 'products'}
+          </span>
+        </div>
+        <span className="text-surface-400 text-xs">{expanded ? '▾' : '▸'}</span>
+      </button>
+      {expanded && (
+        <div className="border-t border-surface-100 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-surface-50 text-[10px] uppercase tracking-wider text-surface-500">
+              <tr>
+                <SortHead label="Product" col="product" />
+                <SortHead label="Leads" col="leads" align="right" />
+                {anyRevenue && <SortHead label="Revenue total" col="revenue" align="right" />}
+                {anyPaid    && <SortHead label="Revenue paid"  col="paid"    align="right" />}
+                {anyRevenue && <SortHead label="Avg / lead"    col="avg"     align="right" />}
+              </tr>
+            </thead>
+            <tbody>
+              {sortedRows.map((r, i) => (
+                <tr key={i} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
+                  <td className="py-2 px-3 text-surface-700 max-w-[260px] truncate" title={r.product}>
+                    {r.product === '(no product)'
+                      ? <span className="text-surface-400 italic">{r.product}</span>
+                      : r.product}
+                  </td>
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                    {fmtInt(r.leads)}
+                  </td>
+                  {anyRevenue && (
+                    <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                      {r.revenue > 0 ? fmtINR(r.revenue) : <span className="text-surface-300">—</span>}
+                    </td>
+                  )}
+                  {anyPaid && (
+                    <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                      {r.paid > 0 ? fmtINR(r.paid) : <span className="text-surface-300">—</span>}
+                    </td>
+                  )}
+                  {anyRevenue && (
+                    <td className="py-2 px-3 text-right tabular-nums text-surface-500 whitespace-nowrap">
+                      {r.leads > 0 && r.revenue > 0
+                        ? fmtINR(Math.round(r.revenue / r.leads))
+                        : <span className="text-surface-300">—</span>}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+            <tfoot className="bg-surface-50 text-[11px] font-medium text-brand-navy">
+              <tr className="border-t border-surface-200">
+                <td className="py-2 px-3">All products</td>
+                <td className="py-2 px-3 text-right tabular-nums">{fmtInt(totals.leads)}</td>
+                {anyRevenue && <td className="py-2 px-3 text-right tabular-nums">{fmtINR(totals.revenue)}</td>}
+                {anyPaid    && <td className="py-2 px-3 text-right tabular-nums">{fmtINR(totals.paid)}</td>}
+                {anyRevenue && (
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-500">
+                    {totals.leads > 0 && totals.revenue > 0
+                      ? fmtINR(Math.round(totals.revenue / totals.leads))
+                      : '—'}
+                  </td>
+                )}
+              </tr>
+            </tfoot>
+          </table>
+          <div className="px-3 py-2 text-[10px] text-surface-400 border-t border-surface-100 bg-surface-50/50">
+            Click any column header to sort. Aggregates only ATTRIBUTED matches (B-after-A).
+            Pre-existing customers and unmatched leads aren't counted here.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// Pivot by source file. Two stacked tables: one grouped by File A source
+// (which lead list produced what), one grouped by File B source (which
+// payment file accounted for what revenue). Renders only when 2+ sources
+// exist on either side — single-source runs hide the pivot since there's
+// nothing to compare.
+function SourcePivot({ pairs, aSourceCount, bSourceCount }: { pairs: MatchedPair[]; aSourceCount: number; bSourceCount: number }) {
+  type Row = { label: string; leads: number; revenue: number; paid: number };
+
+  const byA: Row[] = useMemo(() => {
+    if (aSourceCount < 2) return [];
+    const agg = new Map<string, Row>();
+    for (const p of pairs) {
+      const cur = agg.get(p.aSourceLabel) ?? { label: p.aSourceLabel, leads: 0, revenue: 0, paid: 0 };
+      cur.leads += 1;
+      cur.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
+      cur.paid += p.bMapping.amountPaid ? (parseFloat(p.b[p.bMapping.amountPaid]) || 0) : 0;
+      agg.set(p.aSourceLabel, cur);
+    }
+    return Array.from(agg.values()).sort((x, y) => y.leads - x.leads);
+  }, [pairs, aSourceCount]);
+
+  const byB: Row[] = useMemo(() => {
+    if (bSourceCount < 2) return [];
+    const agg = new Map<string, Row>();
+    for (const p of pairs) {
+      const cur = agg.get(p.bSourceLabel) ?? { label: p.bSourceLabel, leads: 0, revenue: 0, paid: 0 };
+      cur.leads += 1;
+      cur.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
+      cur.paid += p.bMapping.amountPaid ? (parseFloat(p.b[p.bMapping.amountPaid]) || 0) : 0;
+      agg.set(p.bSourceLabel, cur);
+    }
+    return Array.from(agg.values()).sort((x, y) => y.leads - x.leads);
+  }, [pairs, bSourceCount]);
+
+  if (byA.length === 0 && byB.length === 0) return null;
+
+  const totals = (rows: Row[]) => ({
+    leads: rows.reduce((s, r) => s + r.leads, 0),
+    revenue: rows.reduce((s, r) => s + r.revenue, 0),
+    paid: rows.reduce((s, r) => s + r.paid, 0),
+  });
+
+  const SourceTable = ({ title, rows }: { title: string; rows: Row[] }) => {
+    const t = totals(rows);
+    const hasRevenue = rows.some(r => r.revenue > 0);
+    const hasPaid = rows.some(r => r.paid > 0);
+    return (
+      <div className="card overflow-hidden">
+        <div className="px-3 py-2 border-b border-surface-100 flex items-center justify-between">
+          <div className="text-[11px] uppercase tracking-wider text-surface-500">{title}</div>
+          <div className="text-[10px] text-surface-400">{rows.length} source{rows.length === 1 ? '' : 's'}</div>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-surface-50 text-[10px] uppercase tracking-wider text-surface-500">
+              <tr>
+                <th className="text-left py-2 px-3 whitespace-nowrap">Source</th>
+                <th className="text-right py-2 px-3 whitespace-nowrap">Leads</th>
+                {hasRevenue && <th className="text-right py-2 px-3 whitespace-nowrap">Revenue</th>}
+                {hasPaid && <th className="text-right py-2 px-3 whitespace-nowrap">Paid</th>}
+                <th className="text-right py-2 px-3 whitespace-nowrap">Share</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.label} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
+                  <td className="py-2 px-3 text-surface-700 max-w-[260px] truncate" title={r.label}>{r.label}</td>
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(r.leads)}</td>
+                  {hasRevenue && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(r.revenue)}</td>}
+                  {hasPaid && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(r.paid)}</td>}
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-500">{fmtPct(r.leads, t.leads)}</td>
+                </tr>
+              ))}
+              <tr className="bg-surface-50 font-medium">
+                <td className="py-2 px-3 text-surface-700">Total</td>
+                <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(t.leads)}</td>
+                {hasRevenue && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(t.revenue)}</td>}
+                {hasPaid && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(t.paid)}</td>}
+                <td className="py-2 px-3 text-right tabular-nums text-surface-500">100%</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+      {byA.length > 0 && <SourceTable title="By File A source (where leads came from)" rows={byA} />}
+      {byB.length > 0 && <SourceTable title="By File B source (where revenue landed)" rows={byB} />}
+    </div>
+  );
+}
+
+// Duplicate phone detector. Scans every A row the algorithm saw — across all
+// attributed, pre-existing, AND unmatched buckets — for phones that appear
+// more than once. Surfaced as a warning because the algorithm uses the FIRST
+// occurrence; later duplicates are silently ignored. Common cause: the same
+// lead exists in both the dashboard fetch and an uploaded prospect list.
+function DuplicatesCard({
+  pairs,
+  unmatchedSources,
+}: {
+  pairs: MatchedPair[];
+  unmatchedSources: Array<{ row: Record<string, string>; mapping: ColumnMappingA; label: string }>;
+}) {
+  type DupRow = { phone: string; sources: Map<string, number> };
+
+  const dupes: DupRow[] = useMemo(() => {
+    const byPhone = new Map<string, Map<string, number>>();
+    const accumulate = (phoneRaw: string, source: string) => {
+      const ph = normalizePhone(phoneRaw);
+      if (!ph) return;
+      if (!byPhone.has(ph)) byPhone.set(ph, new Map());
+      const m = byPhone.get(ph)!;
+      m.set(source, (m.get(source) ?? 0) + 1);
+    };
+    for (const p of pairs) {
+      accumulate(p.a[p.aMapping.phone] ?? '', p.aSourceLabel);
+    }
+    for (const u of unmatchedSources) {
+      accumulate(u.row[u.mapping.phone] ?? '', u.label);
+    }
+    const dups: DupRow[] = [];
+    for (const [phone, sources] of byPhone.entries()) {
+      const total = Array.from(sources.values()).reduce((s, n) => s + n, 0);
+      if (total > 1) dups.push({ phone, sources });
+    }
+    dups.sort((a, b) => {
+      const ta = Array.from(a.sources.values()).reduce((s, n) => s + n, 0);
+      const tb = Array.from(b.sources.values()).reduce((s, n) => s + n, 0);
+      return tb - ta;
+    });
+    return dups;
+  }, [pairs, unmatchedSources]);
+
+  const [expanded, setExpanded] = useState(false);
+  const [showCount, setShowCount] = useState(25);
+
+  if (dupes.length === 0) return null;
+
+  const totalExtra = dupes.reduce((s, d) => {
+    const t = Array.from(d.sources.values()).reduce((x, n) => x + n, 0);
+    return s + (t - 1);
+  }, 0);
+
+  return (
+    <div className="card overflow-hidden mt-3">
+      <button
+        type="button"
+        onClick={() => setExpanded(e => !e)}
+        className="w-full px-3 py-2 flex items-center justify-between hover:bg-surface-50/50"
+      >
+        <div className="flex items-center gap-2 text-left">
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium">{fmtInt(dupes.length)}</span>
+          <span className="text-sm font-medium text-brand-navy">Duplicate phones in File A</span>
+          <span className="text-[11px] text-surface-500">
+            {fmtInt(totalExtra)} extra row{totalExtra === 1 ? '' : 's'} ignored — first occurrence wins
+          </span>
+        </div>
+        <span className="text-[11px] text-surface-500">{expanded ? 'Hide' : 'Show'}</span>
+      </button>
+      {expanded && (
+        <div className="border-t border-surface-100 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-surface-50 text-[10px] uppercase tracking-wider text-surface-500">
+              <tr>
+                <th className="text-left py-2 px-3 whitespace-nowrap">Phone</th>
+                <th className="text-right py-2 px-3 whitespace-nowrap">Occurrences</th>
+                <th className="text-left py-2 px-3 whitespace-nowrap">Sources</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dupes.slice(0, showCount).map(d => {
+                const total = Array.from(d.sources.values()).reduce((s, n) => s + n, 0);
+                const sourceBreakdown = Array.from(d.sources.entries())
+                  .map(([src, n]) => n > 1 ? `${src} (×${n})` : src)
+                  .join(', ');
+                return (
+                  <tr key={d.phone} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
+                    <td className="py-2 px-3 tabular-nums text-surface-700 whitespace-nowrap">{d.phone}</td>
+                    <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(total)}</td>
+                    <td className="py-2 px-3 text-surface-600 truncate max-w-[420px]" title={sourceBreakdown}>{sourceBreakdown}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          {dupes.length > showCount && (
+            <div className="px-3 py-2 border-t border-surface-100 bg-surface-50/50 flex items-center justify-between text-[11px]">
+              <span className="text-surface-500">Showing {fmtInt(showCount)} of {fmtInt(dupes.length)}</span>
+              <button
+                type="button"
+                onClick={() => setShowCount(c => c + 25)}
+                className="text-brand-pink hover:underline"
+              >
+                Show 25 more
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ResultDetailSection({
   title, count, chip,
   matchedPairs, unmatchedRows,
@@ -2638,7 +3095,7 @@ function ResultDetailSection({
             </thead>
             <tbody>
               {(isUnmatched
-                ? (unmatchedRows ?? []).slice(0, showCount).map(r => ({ a: r, b: {} as Record<string, string>, aDateIso: parseDate(r[mappingA.date] ?? ''), bDateIso: null, lagDays: null, bMapping: mappingB }))
+                ? (unmatchedRows ?? []).slice(0, showCount).map(r => ({ a: r, b: {} as Record<string, string>, aDateIso: parseDate(r[mappingA.date] ?? ''), bDateIso: null, lagDays: null, aMapping: mappingA, bMapping: mappingB, aSourceLabel: '', bSourceLabel: '' }))
                 : (matchedPairs ?? []).slice(0, showCount)
               ).map((item, i) => {
                 const aRow = item.a;
