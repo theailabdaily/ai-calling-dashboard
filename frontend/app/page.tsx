@@ -79,7 +79,9 @@ export default function OverviewPage() {
       <header>
         <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">Overview</h1>
         <p className="text-xs md:text-sm text-surface-500 mt-1">
-          Unified analytics across all AI calling vendors. Tap any (i) for definitions.
+          Unified analytics across all AI calling vendors. The date range filters by
+          when calls happened (call end date) — same as the Leads page. A campaign
+          uploaded earlier still shows up if its dialer ran today. Tap any (i) for definitions.
         </p>
       </header>
 
