@@ -60,10 +60,14 @@ class MetricFilters:
 
     def apply(self, stmt):
         conds = []
+        # Filter by call ACTIVITY date (when the call ended, or upload date for
+        # never-dialed rows). See `_activity_at` definition below. This is what
+        # the Leads page uses, so picking "Today" on the date range surfaces the
+        # same leads on Overview / Call Logs / Funnel as on the Leads table.
         if self.start:
-            conds.append(CallLog.vendor_created_at >= self.start)
+            conds.append(_activity_at >= self.start)
         if self.end:
-            conds.append(CallLog.vendor_created_at <= self.end)
+            conds.append(_activity_at <= self.end)
         if self.vendor_ids:
             conds.append(CallLog.vendor_id.in_(self.vendor_ids))
         if self.campaign_ids:
@@ -76,6 +80,29 @@ class MetricFilters:
 
 
 # Reusable expressions
+
+# Date semantics for ALL filtering and time-bucketing in this module.
+#
+# `vendor_created_at` is when Hunar created the row (queue/upload time). That
+# was the original filter column but it gave a confusing result: a campaign
+# launched on May 12 whose dialer runs every day across May 13, 14, 15 would
+# put EVERY call into "May 12" because that's when the rows were created —
+# even though the actual call activity (and the result, and the revenue, and
+# the customer interaction) happened on later days.
+#
+# `_activity_at` instead is "when did the most recent call activity happen
+# on this row", matching the Leads page's `final_at` definition. For a
+# completed call: ended_at. For a still-pending/scheduled row that hasn't
+# been dialed yet: vendor_created_at (fallback). This is what BD users mean
+# when they say "today's leads" — the leads that something HAPPENED to
+# today, not the leads that were uploaded today.
+#
+# Centralized here so every filter / time-bucket on Overview, Funnel, Calls
+# Over Time, Hourly Insights, Vendor / Campaign / Agent breakdowns, Call
+# Logs, and CSV exports stays aligned with the Leads page. Changing this
+# single expression changes the meaning of "today" everywhere.
+_activity_at = func.coalesce(CallLog.ended_at, CallLog.vendor_created_at)
+
 _is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
 _is_engaged = CallLog.engagement_status == "ENGAGED"
 # JSONB key check — Hunar uses qualitative levels.
@@ -381,7 +408,9 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
 # Calls over time — bucketed by day for the line chart
 # ---------------------------------------------------------------------------
 async def calls_over_time(db: AsyncSession, filters: MetricFilters, bucket: str = "day") -> list[dict[str, Any]]:
-    trunc = func.date_trunc(bucket, CallLog.vendor_created_at)
+    # Bucket by activity date (call end, fallback to upload date). Matches the
+    # Leads page so the chart counts agree with the Leads page totals.
+    trunc = func.date_trunc(bucket, _activity_at)
     stmt = (
         select(
             trunc.label("bucket"),
@@ -607,10 +636,13 @@ async def campaign_breakdown(db: AsyncSession, filters: MetricFilters) -> list[d
 # Bucketed in IST (Asia/Kolkata) since the calling operation is India-based.
 # ---------------------------------------------------------------------------
 async def hourly_breakdown(db: AsyncSession, filters: MetricFilters) -> list[dict[str, Any]]:
-    # date_part('hour', ts AT TIME ZONE 'Asia/Kolkata') gives 0..23
+    # date_part('hour', ts AT TIME ZONE 'Asia/Kolkata') gives 0..23.
+    # Buckets by ACTIVITY time (when the call ended) so the hour breakdown
+    # reflects when the dialer was actually working, not when leads were
+    # queued for it.
     hour_expr = func.date_part(
         "hour",
-        func.timezone("Asia/Kolkata", CallLog.vendor_created_at),
+        func.timezone("Asia/Kolkata", _activity_at),
     )
     stmt = (
         select(
@@ -663,12 +695,15 @@ _DOW_NAMES = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Su
 
 
 def _hour_expr_ist():
-    return func.date_part("hour", func.timezone("Asia/Kolkata", CallLog.vendor_created_at))
+    # Hour of activity (call-end if available, else upload time) in IST.
+    # Keeps Hourly Insights aligned with Leads-page semantics.
+    return func.date_part("hour", func.timezone("Asia/Kolkata", _activity_at))
 
 
 def _dow_expr_ist():
-    # ISODOW: 1=Mon ... 7=Sun -- intuitive sort order
-    return func.extract("isodow", func.timezone("Asia/Kolkata", CallLog.vendor_created_at))
+    # ISODOW: 1=Mon ... 7=Sun -- intuitive sort order.
+    # Same activity-date semantics as _hour_expr_ist.
+    return func.extract("isodow", func.timezone("Asia/Kolkata", _activity_at))
 
 
 def _bucket_row_to_dict(r, key: str) -> dict[str, Any]:
