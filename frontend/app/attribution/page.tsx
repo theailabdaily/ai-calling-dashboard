@@ -72,7 +72,6 @@ type ColumnMappingB = {
 type ExtraMapping = { label: string; column: string };
 
 type AttributionRule = 'b_after_a' | 'any_time';
-type FileASource = 'dashboard' | 'upload';
 type DashboardRange = 'last_7' | 'last_30' | 'last_90' | 'last_180' | 'all_time';
 
 type MatchedPair = {
@@ -307,6 +306,39 @@ async function parseFile(file: File): Promise<{ columns: string[]; rows: Record<
   // .csv, .tsv, or anything else — text mode
   const text = await file.text();
   return parseCSV(text);
+}
+
+// Merge multiple CSVData sources into one. Column list is the union (preserves
+// first-seen order so dashboard's mobile_number / final_lead_status_date stay
+// at the front when present). Rows from a source missing a column get '' for
+// that column — the algorithm's `row[col] ?? ''` reads already tolerate this.
+// Returns null when parts is empty.
+function mergeSources(parts: CSVData[]): CSVData | null {
+  if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+
+  const seenCols = new Set<string>();
+  const columns: string[] = [];
+  for (const p of parts) {
+    for (const c of p.columns) {
+      if (!seenCols.has(c)) { seenCols.add(c); columns.push(c); }
+    }
+  }
+  const rows: Record<string, string>[] = [];
+  for (const p of parts) {
+    for (const r of p.rows) {
+      // Build a row with every union column present (default '') — keeps
+      // downstream code from having to do existence checks everywhere.
+      const merged: Record<string, string> = {};
+      for (const c of columns) merged[c] = r[c] ?? '';
+      rows.push(merged);
+    }
+  }
+  return {
+    filename: parts.map(p => p.filename).join(' + '),
+    columns,
+    rows,
+  };
 }
 
 // ---- Phone normalization (Indian focus) ------------------------------------
@@ -737,8 +769,7 @@ function flattenPairs(pairs: MatchedPair[], mappingB: ColumnMappingB): Record<st
 // =============================================================================
 
 export default function LeadAttributionPage() {
-  // File A mode
-  const [fileASource, setFileASource] = useState<FileASource>('dashboard');
+  // Dashboard fetch config
   const [dashboardRange, setDashboardRange] = useState<DashboardRange>('last_30');
   const [loadingDashboard, setLoadingDashboard] = useState(false);
 
@@ -754,10 +785,31 @@ export default function LeadAttributionPage() {
   const campaignsQ = useQuery({ queryKey: ['campaigns'], queryFn: () => api.campaigns(), staleTime: 5 * 60_000 });
   const agentsQ    = useQuery({ queryKey: ['agents'],    queryFn: () => api.agents(),    staleTime: 5 * 60_000 });
 
-  // Files (after load — same shape regardless of source)
-  const [fileA, setFileA] = useState<CSVData | null>(null);
-  const [fileB, setFileB] = useState<CSVData | null>(null);
+  // File A sources — dashboard fetch (one slot) PLUS any number of uploaded
+  // files. They merge into a single CSVData via union of columns. File B is
+  // upload-only, so it's just an array. Each source has its own × chip so the
+  // user can drop one without losing the rest.
+  const [dashboardData, setDashboardData] = useState<CSVData | null>(null);
+  const [uploadsA, setUploadsA] = useState<CSVData[]>([]);
+  const [uploadsB, setUploadsB] = useState<CSVData[]>([]);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [loadingFile, setLoadingFile] = useState<'A' | 'B' | null>(null);
+
+  // The merged datasets we hand to the algorithm. Re-derived whenever any
+  // source changes. mergeSources unions the column lists; rows from a source
+  // missing a column get '' for that column.
+  const fileA: CSVData | null = useMemo(() => {
+    const parts: CSVData[] = [];
+    if (dashboardData) parts.push(dashboardData);
+    parts.push(...uploadsA);
+    return mergeSources(parts);
+  }, [dashboardData, uploadsA]);
+
+  const fileB: CSVData | null = useMemo(() => mergeSources(uploadsB), [uploadsB]);
+
+  // True when ANY File A source comes from the dashboard. Drives auto-mapping
+  // lock + the "auto-mapped" hint in Step 2.
+  const hasDashboardA = !!dashboardData;
 
   // Mappings
   const [mappingA, setMappingA] = useState<ColumnMappingA>({ phone: '', date: '', extras: [] });
@@ -796,6 +848,55 @@ export default function LeadAttributionPage() {
   const [results, setResults] = useState<Results | null>(null);
   const [running, setRunning] = useState(false);
 
+  // When the merged fileA columns change, re-run auto-detect for mappings.
+  // This handles two important cases: (1) dashboard fetch completes, (2) user
+  // adds an uploaded file that introduces new columns. We only stomp current
+  // mappings if they aren't valid against the new column set.
+  useEffect(() => {
+    if (!fileA) return;
+    setMappingA(prev => {
+      const phoneOk = prev.phone && fileA.columns.includes(prev.phone);
+      const dateOk = prev.date && fileA.columns.includes(prev.date);
+      const next = autoDetectA(fileA.columns);
+      return {
+        phone: phoneOk ? prev.phone : next.phone,
+        date:  dateOk  ? prev.date  : next.date,
+        // Keep existing extras whose columns still exist; append any new auto-detected
+        // ones that aren't already in the list.
+        extras: [
+          ...prev.extras.filter(e => fileA.columns.includes(e.column)),
+          ...next.extras.filter(ne => !prev.extras.some(pe => pe.label === ne.label)),
+        ],
+      };
+    });
+  }, [fileA]);
+
+  useEffect(() => {
+    if (!fileB) return;
+    setMappingB(prev => {
+      const phoneOk = prev.phone && fileB.columns.includes(prev.phone);
+      const dateOk = prev.date && fileB.columns.includes(prev.date);
+      const autoAmount = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS.amount]);
+      const autoPaid   = findColumn(fileB.columns, [...OPTIONAL_B_PATTERNS.amountPaid]);
+      const autoExtras: ExtraMapping[] = [];
+      for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS)) {
+        const found = findColumn(fileB.columns, patterns);
+        if (found) autoExtras.push({ label, column: found });
+      }
+      const detect = autoDetectB(fileB.columns);
+      return {
+        phone: phoneOk ? prev.phone : detect.phone,
+        date:  dateOk  ? prev.date  : detect.date,
+        amount:     prev.amount && fileB.columns.includes(prev.amount) ? prev.amount : autoAmount,
+        amountPaid: prev.amountPaid && fileB.columns.includes(prev.amountPaid) ? prev.amountPaid : autoPaid,
+        extras: [
+          ...prev.extras.filter(e => fileB.columns.includes(e.column)),
+          ...autoExtras.filter(ae => !prev.extras.some(pe => pe.label === ae.label)),
+        ],
+      };
+    });
+  }, [fileB]);
+
   // ---- File A: dashboard fetch ----
   const fetchDashboardLeads = useCallback(async (range: DashboardRange) => {
     setParseError(null);
@@ -813,10 +914,6 @@ export default function LeadAttributionPage() {
         vendor_ids:   Array.from(vendorIds),
         campaign_ids: Array.from(campaignIds),
       };
-      // Agent filter rides as a query param. The export endpoint accepts an
-      // `agent_id` filter via parse_filters; we pass the first selected one
-      // explicitly if present (the existing endpoint doesn't accept multi).
-      // For multi-agent selection we fall back to client-side filtering.
       const url = api.exportCallsUrl(filters, {});
       const resp = await fetch(url, { credentials: 'include' });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -826,8 +923,8 @@ export default function LeadAttributionPage() {
         throw new Error('Dashboard returned no leads for this filter combination.');
       }
       // Client-side agent filter (if user picked specific agents). We match
-      // against the `agent` column the export writes — it's a name string, so
-      // resolve names from the loaded agent list.
+      // against the `agent` column the export writes — resolve names from the
+      // loaded agent list since the column stores names, not ids.
       let rows = parsed.rows;
       if (agentIds.size > 0) {
         const agentNameById = new Map<string, string>();
@@ -840,7 +937,9 @@ export default function LeadAttributionPage() {
           throw new Error('No leads match the selected agent filter.');
         }
       }
-      // Enrich every row with a computed bucket
+      // Enrich every row with a computed bucket — present in dashboard rows
+      // only. Uploaded files won't have _bucket; merging is fine since the
+      // bucket detection uses the column existence check.
       const enrichedRows = rows.map(r => ({
         ...r,
         _bucket: computeBucket(r),
@@ -853,39 +952,35 @@ export default function LeadAttributionPage() {
         columns,
         rows: enrichedRows,
       };
-      setFileA(data);
-      // Auto-populate display extras for the preview — Vendor / Campaign /
-      // Agent are useful surfacing in dashboard mode and always present in
-      // the export. User can remove any via × in Step 2.
-      const autoExtrasA: ExtraMapping[] = [];
-      for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS_A)) {
-        const found = findColumn(columns, patterns);
-        if (found) autoExtrasA.push({ label, column: found });
+      setDashboardData(data);
+      // Bucket selection defaults to the actionable three on initial fetch.
+      // Skip if user already has a selection (re-fetching after a range change
+      // should preserve their bucket toggles).
+      if (bucketSelA.size === 0) {
+        const uniqueBuckets = uniqueValues(enrichedRows, '_bucket');
+        setBucketSelA(defaultBucketSelection(uniqueBuckets));
       }
-      setMappingA({
-        phone: 'mobile_number',
-        date:  'final_lead_status_date',
-        extras: autoExtrasA,
-      });
-      const uniqueBuckets = uniqueValues(enrichedRows, '_bucket');
-      setBucketSelA(defaultBucketSelection(uniqueBuckets));
-      setFiltersA([]);
     } catch (e: any) {
       setParseError(`Dashboard fetch failed: ${e?.message || 'unknown error'}`);
-      setFileA(null);
+      setDashboardData(null);
     } finally {
       setLoadingDashboard(false);
     }
+  // bucketSelA intentionally NOT in deps — we read it for the initial-fetch
+  // guard but don't want to re-fire fetchDashboardLeads on every bucket toggle.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vendorIds, campaignIds, agentIds, agentsQ.data]);
 
-  // ---- File handlers (upload mode) ----
+  // ---- File handlers — append-mode for both A and B ----
+  // Uploaded files are appended to the source array, not replacing prior data.
+  // For File A, an upload can coexist with a dashboard fetch (the merged
+  // dataset is recomputed via useMemo). For File B, multiple uploads simply
+  // concatenate. Each source has its own × button to remove individually.
   const handleFileLoad = useCallback(
     async (which: 'A' | 'B', file: File) => {
       setParseError(null);
+      setLoadingFile(which);
       try {
-        // parseFile auto-detects CSV vs XLSX from extension. XLSX support is
-        // lazy-loaded from CDN on first use — first upload may take ~1s while
-        // SheetJS downloads, subsequent uploads are instant.
         const parsed = await parseFile(file);
         if (parsed.columns.length === 0) {
           setParseError(`${file.name}: no columns detected. Is the file empty?`);
@@ -897,82 +992,52 @@ export default function LeadAttributionPage() {
           rows: parsed.rows,
         };
         if (which === 'A') {
-          setFileA(data);
-          setMappingA(autoDetectA(parsed.columns));
-          const col = detectCategoricalColumn(parsed.columns, BUCKET_COL_PATTERNS);
-          if (col) {
-            const vals = uniqueValues(parsed.rows, col);
-            setBucketSelA(defaultBucketSelection(vals));
-          } else {
-            setBucketSelA(new Set());
-          }
-          setFiltersA([]);
+          setUploadsA(prev => [...prev, data]);
         } else {
-          setFileB(data);
-          // Auto-populate default mappings: phone + date (always), plus the
-          // useful presets — Amount, Paid, Product, Source. Each is only
-          // included if a matching column is found. User can remove any of
-          // these via × or add more via the "+" pills below the panel.
-          const autoAmount = findColumn(parsed.columns, [...OPTIONAL_B_PATTERNS.amount]);
-          const autoPaid   = findColumn(parsed.columns, [...OPTIONAL_B_PATTERNS.amountPaid]);
-          const autoExtras: ExtraMapping[] = [];
-          for (const [label, patterns] of Object.entries(EXTRA_PRESET_PATTERNS)) {
-            const found = findColumn(parsed.columns, patterns);
-            if (found) autoExtras.push({ label, column: found });
-          }
-          setMappingB({
-            phone: autoDetectB(parsed.columns).phone,
-            date:  autoDetectB(parsed.columns).date,
-            amount: autoAmount,
-            amountPaid: autoPaid,
-            extras: autoExtras,
-          });
-          // No special status filter — Step 3's File B panel is symmetric
-          // with File A's (just "+ Add filter"). Users add a custom filter
-          // on `status` (or any other column) if they want it.
-          setStatusSelB(new Set());
-          setFiltersB([]);
+          setUploadsB(prev => [...prev, data]);
         }
         setResults(null);
       } catch (e: any) {
         setParseError(`${file.name}: ${e?.message || 'failed to read'}`);
+      } finally {
+        setLoadingFile(null);
       }
     },
     [],
   );
 
-  const clearFile = (which: 'A' | 'B') => {
-    if (which === 'A') {
-      setFileA(null); setMappingA({ phone: '', date: '', extras: [] });
-      setBucketSelA(new Set()); setFiltersA([]);
-    } else {
-      setFileB(null); setMappingB({ phone: '', date: '', extras: [] });
-      setStatusSelB(new Set()); setFiltersB([]);
+  // Remove one specific source. For File A this is either the dashboard fetch
+  // (clears dashboardData) or one indexed upload from uploadsA. For File B,
+  // always an indexed upload.
+  const removeSourceA = (kind: 'dashboard' | 'upload', index?: number) => {
+    if (kind === 'dashboard') {
+      setDashboardData(null);
+    } else if (typeof index === 'number') {
+      setUploadsA(prev => prev.filter((_, i) => i !== index));
     }
+    setResults(null);
+  };
+  const removeSourceB = (index: number) => {
+    setUploadsB(prev => prev.filter((_, i) => i !== index));
     setResults(null);
   };
 
   const resetAll = () => {
-    setFileA(null); setFileB(null);
+    setDashboardData(null);
+    setUploadsA([]);
+    setUploadsB([]);
     setMappingA({ phone: '', date: '', extras: [] });
     setMappingB({ phone: '', date: '', extras: [] });
-    setBucketSelA(new Set()); setStatusSelB(new Set());
-    setFiltersA([]); setFiltersB([]);
-    setResults(null); setParseError(null);
-    setFileASource('dashboard');
-    setDashboardRange('last_30');
-  };
-
-  // Switch A source — clears existing A data so the user re-loads it
-  const switchASource = (next: FileASource) => {
-    if (next === fileASource) return;
-    setFileASource(next);
-    setFileA(null);
     setBucketSelA(new Set());
+    setStatusSelB(new Set());
     setFiltersA([]);
-    setMappingA({ phone: '', date: '', extras: [] });
+    setFiltersB([]);
     setResults(null);
     setParseError(null);
+    setDashboardRange('last_30');
+    setVendorIds(new Set());
+    setCampaignIds(new Set());
+    setAgentIds(new Set());
   };
 
   // ---- Live row counts after filtering ----
@@ -1021,17 +1086,44 @@ export default function LeadAttributionPage() {
 
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1100px] mx-auto">
-      <header>
-        <h1 className="text-xl md:text-2xl font-semibold text-brand-navy flex items-center gap-2">
-          <Shuffle size={22} className="text-brand-pink" />
-          Lead Attribution
-        </h1>
-        <p className="text-xs md:text-sm text-surface-500 mt-1">
-          Check which leads from this dashboard became paid users in an external file.
-          Pull leads directly from the dashboard (default) or upload a custom list, then
-          upload your payments / outcomes file. Accepts CSV, XLSX, and XLS. Filters apply
-          before matching.
-        </p>
+      <header className="flex items-start gap-3">
+        {/* Branded badge — rounded-square chip with a custom funnel-and-arrow
+            mark drawn as inline SVG. Matches the chip style of major SaaS
+            apps (Anthropic, ChatGPT, Google etc.) and gives the page a
+            recognizable visual anchor instead of just a small lucide icon. */}
+        <div className="shrink-0 mt-0.5">
+          <div className="w-11 h-11 md:w-12 md:h-12 rounded-xl bg-gradient-to-br from-brand-pink to-[#e11d48] shadow-sm flex items-center justify-center ring-1 ring-brand-pink/20">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="w-6 h-6 md:w-7 md:h-7 text-white"
+              aria-hidden="true"
+            >
+              {/* Two-track flow merging into one outcome — visual metaphor
+                  for "leads + payments → attribution match". Top track is
+                  the lead source, bottom is the payment source, the right
+                  side is the attributed result. */}
+              <path d="M3 6h6l4 6 4-6h4" />
+              <path d="M3 18h6l4-6" />
+              <circle cx="20" cy="12" r="1.5" fill="currentColor" />
+            </svg>
+          </div>
+        </div>
+        <div className="flex-1 min-w-0">
+          <h1 className="text-xl md:text-2xl font-semibold text-brand-navy">
+            Lead Attribution
+          </h1>
+          <p className="text-xs md:text-sm text-surface-500 mt-1">
+            Check which leads from this dashboard became paid users in an external file.
+            Pull leads directly from the dashboard (default) or upload a custom list, then
+            upload your payments / outcomes file. Accepts CSV, XLSX, and XLS. Filters apply
+            before matching.
+          </p>
+        </div>
       </header>
 
       <StepStrip active={!fileA || !fileB ? 1 : !results ? 3 : 4} />
@@ -1047,85 +1139,69 @@ export default function LeadAttributionPage() {
       <section>
         <h2 className="text-sm font-medium text-brand-navy mb-2">Step 1 — Sources</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {/* File A panel */}
-          <div className="card p-3">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="text-[11px] uppercase tracking-wider text-surface-500">File A — leads</div>
-              <div className="inline-flex bg-surface-100 border border-surface-200 rounded p-0.5 text-[11px]">
-                <button
-                  type="button"
-                  onClick={() => switchASource('dashboard')}
-                  className={`px-2 py-0.5 rounded inline-flex items-center gap-1 ${
-                    fileASource === 'dashboard'
-                      ? 'bg-white text-brand-navy font-medium shadow-sm'
-                      : 'text-surface-500 hover:text-brand-navy'
-                  }`}
-                >
-                  <Database size={11} />
-                  Dashboard
-                </button>
-                <button
-                  type="button"
-                  onClick={() => switchASource('upload')}
-                  className={`px-2 py-0.5 rounded inline-flex items-center gap-1 ${
-                    fileASource === 'upload'
-                      ? 'bg-white text-brand-navy font-medium shadow-sm'
-                      : 'text-surface-500 hover:text-brand-navy'
-                  }`}
-                >
-                  <Upload size={11} />
-                  Upload
-                </button>
-              </div>
-            </div>
+          {/* File A — Dashboard + Upload coexist. Both contribute rows. */}
+          <div className="card p-3 space-y-3">
+            <div className="text-[11px] uppercase tracking-wider text-surface-500">File A — leads</div>
 
-            {fileASource === 'dashboard' ? (
-              <DashboardSourcePanel
-                range={dashboardRange}
-                setRange={setDashboardRange}
-                loading={loadingDashboard}
-                fileA={fileA}
-                onLoad={fetchDashboardLeads}
-                onClear={() => clearFile('A')}
-                vendors={vendorsQ.data ?? []}
-                campaigns={campaignsQ.data ?? []}
-                agents={agentsQ.data ?? []}
-                vendorIds={vendorIds}     setVendorIds={setVendorIds}
-                campaignIds={campaignIds} setCampaignIds={setCampaignIds}
-                agentIds={agentIds}       setAgentIds={setAgentIds}
-                bucketValues={bucketValuesA}
-                bucketSel={bucketSelA}
-                setBucketSel={setBucketSelA}
-                filteredCount={filteredACount}
+            {/* Dashboard source — always visible. Either has data or shows
+                the pull controls; clears via × on its chip. */}
+            <DashboardSourcePanel
+              range={dashboardRange}
+              setRange={setDashboardRange}
+              loading={loadingDashboard}
+              dashboardData={dashboardData}
+              onLoad={fetchDashboardLeads}
+              onClear={() => removeSourceA('dashboard')}
+              vendors={vendorsQ.data ?? []}
+              campaigns={campaignsQ.data ?? []}
+              agents={agentsQ.data ?? []}
+              vendorIds={vendorIds}     setVendorIds={setVendorIds}
+              campaignIds={campaignIds} setCampaignIds={setCampaignIds}
+              agentIds={agentIds}       setAgentIds={setAgentIds}
+              bucketValues={bucketValuesA}
+              bucketSel={bucketSelA}
+              setBucketSel={setBucketSelA}
+              filteredCount={filteredACount}
+              fileARowsTotal={fileA?.rows.length ?? 0}
+            />
+
+            {/* Upload source — additive. Each uploaded file gets its own chip
+                below; users can drop multiple in a row. */}
+            <div className="border-t border-surface-100 pt-3">
+              <div className="text-[10px] text-surface-500 mb-1.5">
+                {uploadsA.length === 0 ? 'Or upload extra files' : `${uploadsA.length} uploaded file${uploadsA.length === 1 ? '' : 's'}`}
+              </div>
+              {uploadsA.map((u, i) => (
+                <div key={`a-${i}-${u.filename}`} className="mb-1.5">
+                  <LoadedFileChip data={u} onClear={() => removeSourceA('upload', i)} />
+                </div>
+              ))}
+              <UploadDropZone
+                label={uploadsA.length === 0 ? 'Drop leads file' : 'Drop another file'}
+                sublabel={uploadsA.length === 0 ? 'merged into File A on top of dashboard fetch' : 'merged with the files above'}
+                onLoad={f => handleFileLoad('A', f)}
+                loading={loadingFile === 'A'}
               />
-            ) : (
-              fileA ? (
-                <LoadedFileChip data={fileA} onClear={() => clearFile('A')} />
-              ) : (
-                <UploadDropZone
-                  label="Drop leads file"
-                  sublabel="any list of leads with a phone column"
-                  onLoad={f => handleFileLoad('A', f)}
-                />
-              )
-            )}
+            </div>
           </div>
 
-          {/* File B panel */}
-          <div className="card p-3">
-            <div className="flex items-center justify-between mb-2">
+          {/* File B — upload-only, multi-file. Each upload appends. */}
+          <div className="card p-3 space-y-3">
+            <div className="flex items-center justify-between">
               <div className="text-[11px] uppercase tracking-wider text-surface-500">File B — outcomes / payments</div>
-              <div className="text-[11px] text-surface-400">Upload only</div>
+              <div className="text-[11px] text-surface-400">
+                {uploadsB.length === 0 ? 'Upload one or more files' : `${uploadsB.length} file${uploadsB.length === 1 ? '' : 's'} loaded`}
+              </div>
             </div>
-            {fileB ? (
-              <LoadedFileChip data={fileB} onClear={() => clearFile('B')} />
-            ) : (
-              <UploadDropZone
-                label="Drop payments file"
-                sublabel="CRM transactions, signups, etc."
-                onLoad={f => handleFileLoad('B', f)}
-              />
-            )}
+            {uploadsB.map((u, i) => (
+              <LoadedFileChip key={`b-${i}-${u.filename}`} data={u} onClear={() => removeSourceB(i)} />
+            ))}
+            <UploadDropZone
+              label={uploadsB.length === 0 ? 'Drop payments file' : 'Drop another file'}
+              sublabel={uploadsB.length === 0 ? 'CRM transactions, signups, etc.' : 'merged with the files above'}
+              onLoad={f => handleFileLoad('B', f)}
+              loading={loadingFile === 'B'}
+            />
           </div>
         </div>
       </section>
@@ -1138,8 +1214,14 @@ export default function LeadAttributionPage() {
             <div className="card p-3 space-y-2">
               <div className="flex items-center justify-between">
                 <div className="text-[11px] uppercase tracking-wider text-surface-500">File A</div>
-                {fileASource === 'dashboard' && (
+                {hasDashboardA && uploadsA.length === 0 && (
                   <div className="text-[10px] text-surface-400 italic">auto-mapped</div>
+                )}
+                {hasDashboardA && uploadsA.length > 0 && (
+                  <div className="text-[10px] text-surface-400 italic">{uploadsA.length + 1} sources merged</div>
+                )}
+                {!hasDashboardA && uploadsA.length > 1 && (
+                  <div className="text-[10px] text-surface-400 italic">{uploadsA.length} sources merged</div>
                 )}
               </div>
               <ColumnPicker
@@ -1147,14 +1229,12 @@ export default function LeadAttributionPage() {
                 columns={fileA.columns}
                 value={mappingA.phone}
                 onChange={v => setMappingA(m => ({ ...m, phone: v }))}
-                disabled={fileASource === 'dashboard'}
               />
               <ColumnPicker
                 label="Date"
                 columns={fileA.columns}
                 value={mappingA.date}
                 onChange={v => setMappingA(m => ({ ...m, date: v }))}
-                disabled={fileASource === 'dashboard'}
               />
 
               {/* Display-only extras for File A — Vendor, Campaign, Agent or
@@ -1335,8 +1415,8 @@ export default function LeadAttributionPage() {
             customFilters={filtersA}
             setCustomFilters={setFiltersA}
             columns={fileA.columns}
-            hideDetectionHint={fileASource === 'dashboard'}
-            hideBucketSection={fileASource === 'dashboard'}
+            hideDetectionHint={hasDashboardA}
+            hideBucketSection={hasDashboardA}
           />
 
           <FilterPanel
@@ -1441,16 +1521,16 @@ function StepStrip({ active }: { active: 1 | 2 | 3 | 4 }) {
 }
 
 function DashboardSourcePanel({
-  range, setRange, loading, fileA, onLoad, onClear,
+  range, setRange, loading, dashboardData, onLoad, onClear,
   vendors, campaigns, agents,
   vendorIds, setVendorIds, campaignIds, setCampaignIds, agentIds, setAgentIds,
   bucketValues, bucketSel, setBucketSel,
-  filteredCount,
+  filteredCount, fileARowsTotal,
 }: {
   range: DashboardRange;
   setRange: (r: DashboardRange) => void;
   loading: boolean;
-  fileA: CSVData | null;
+  dashboardData: CSVData | null;
   onLoad: (r: DashboardRange) => void;
   onClear: () => void;
   vendors: Vendor[];
@@ -1463,6 +1543,7 @@ function DashboardSourcePanel({
   bucketSel: Set<string>;
   setBucketSel: (s: Set<string>) => void;
   filteredCount: number;
+  fileARowsTotal: number;
 }) {
   // Campaign list narrows to selected vendors if any vendor is picked, so the
   // dropdown stays scoped to what the user is actually looking at.
@@ -1498,14 +1579,14 @@ function DashboardSourcePanel({
           onChange={e => {
             const v = e.target.value as DashboardRange;
             setRange(v);
-            if (fileA) onLoad(v);
+            if (dashboardData) onLoad(v);
           }}
           className="text-xs px-2 py-1 border border-surface-200 rounded bg-white text-brand-navy hover:border-surface-300 focus:outline-none focus:ring-2 focus:ring-brand-pink/30"
         >
           {RANGE_OPTIONS.map(r => <option key={r.key} value={r.key}>{r.label}</option>)}
         </select>
         <div className="flex-1" />
-        {fileA ? (
+        {dashboardData ? (
           <button
             type="button"
             onClick={() => onLoad(range)}
@@ -1590,7 +1671,7 @@ function DashboardSourcePanel({
           is computed client-side from each row's interest_level / next_step.
           Until then we can't know what values are in the data. The same state
           drives Step 3's filter, so toggling here = toggling there. */}
-      {fileA && bucketValues.length > 0 && (
+      {dashboardData && bucketValues.length > 0 && (
         <div className="border-t border-surface-100 pt-2 mb-2">
           <BucketPills
             label="Bucket"
@@ -1603,20 +1684,20 @@ function DashboardSourcePanel({
         </div>
       )}
 
-      {fileA ? (
+      {dashboardData ? (
         <div className="bg-surface-50 border border-surface-100 rounded px-2 py-2 flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-sm font-medium text-brand-navy flex items-center gap-1.5 truncate">
               <Database size={13} className="text-brand-pink shrink-0" />
-              <span className="truncate">{fileA.filename}</span>
+              <span className="truncate">{dashboardData.filename}</span>
             </div>
             <div className="text-[10px] text-surface-500 mt-0.5">
-              {filteredCount === fileA.rows.length ? (
-                <>{fmtInt(fileA.rows.length)} unique leads · {fileA.columns.length} columns</>
+              {filteredCount === fileARowsTotal ? (
+                <>{fmtInt(dashboardData.rows.length)} unique leads from dashboard · {dashboardData.columns.length} columns</>
               ) : (
                 <>
                   <strong className="text-brand-pink">{fmtInt(filteredCount)}</strong>
-                  <span> of {fmtInt(fileA.rows.length)} leads after bucket filter · {fileA.columns.length} columns</span>
+                  <span> of {fmtInt(fileARowsTotal)} merged leads after bucket filter</span>
                 </>
               )}
             </div>
@@ -1743,25 +1824,29 @@ function MultiSelect({
 }
 
 function UploadDropZone({
-  label, sublabel, onLoad,
+  label, sublabel, onLoad, loading = false,
 }: {
   label: string;
   sublabel: string;
   onLoad: (f: File) => void;
+  loading?: boolean;
 }) {
   const [dragOver, setDragOver] = useState(false);
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
+    if (loading) return;
     const f = e.dataTransfer.files?.[0];
     if (f) onLoad(f);
   };
   return (
     <label
       className={`cursor-pointer border-dashed border-2 rounded-md transition-colors text-center block py-4 px-3 ${
-        dragOver ? 'border-brand-pink bg-brand-pink/5' : 'border-surface-200 hover:border-surface-300'
+        loading
+          ? 'border-surface-200 bg-surface-50 cursor-wait opacity-70'
+          : dragOver ? 'border-brand-pink bg-brand-pink/5' : 'border-surface-200 hover:border-surface-300'
       }`}
-      onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+      onDragOver={e => { e.preventDefault(); if (!loading) setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
     >
@@ -1769,13 +1854,18 @@ function UploadDropZone({
         type="file"
         accept=".csv,.tsv,.xlsx,.xls,.xlsm,.xlsb,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         className="hidden"
+        disabled={loading}
         onChange={e => {
           const f = e.target.files?.[0];
           if (f) onLoad(f);
+          // Reset value so re-uploading the same file triggers onChange again
+          e.target.value = '';
         }}
       />
-      <Upload size={16} className="mx-auto text-surface-400 mb-1" />
-      <div className="text-xs font-medium text-brand-navy">{label}</div>
+      {loading
+        ? <Loader2 size={16} className="mx-auto text-surface-400 mb-1 animate-spin" />
+        : <Upload size={16} className="mx-auto text-surface-400 mb-1" />}
+      <div className="text-xs font-medium text-brand-navy">{loading ? 'Reading file…' : label}</div>
       <div className="text-[10px] text-surface-500 mt-0.5">{sublabel}</div>
       <div className="text-[10px] text-surface-400 mt-1">Drop or click · CSV / XLSX / XLS</div>
     </label>
