@@ -1,74 +1,72 @@
 'use client';
-import type { VendorRow } from '@/types';
-import { fmt } from '@/lib/api';
+import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import FilterBar from '@/components/filters/filter-bar';
+import HourlyKpiStrip from '@/components/ui/hourly-kpi-strip';
+import HeatmapDowHour from '@/components/charts/heatmap-dow-hour';
+import HourDetail from '@/components/charts/hour-detail';
+import DowChart from '@/components/charts/dow-chart';
+import HourByVendor from '@/components/charts/hour-by-vendor';
+import HourByCampaign from '@/components/charts/hour-by-campaign';
+import InsightsPanel from '@/components/ui/insights-panel';
+import { api } from '@/lib/api';
+import { hourlyInsights as buildHourlyInsights } from '@/lib/insights';
+import type { Filters } from '@/types';
 
-type Props = {
-  data: VendorRow[];
-  isLoading?: boolean;
-  isError?: boolean;
+const initialFilters: Filters = {
+  start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+  end: new Date(),
+  vendor_ids: [],
+  campaign_ids: [],
 };
 
-export default function VendorTable({ data, isLoading, isError }: Props) {
+export default function HourlyInsightsPage() {
+  const [filters, setFilters] = useState<Filters>(initialFilters);
+
+  const insights = useQuery({
+    queryKey: ['hourly-insights', filters],
+    queryFn: () => api.hourlyInsights(filters),
+  });
+
+  const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
+  const data = insights.data;
+  const narrative = buildHourlyInsights(data);
+
   return (
-    <div className="card overflow-hidden">
-      <div className="px-5 py-4 border-b border-surface-200">
-        <h3 className="text-sm font-semibold text-brand-navy">Vendor comparison</h3>
-        <p className="text-xs text-surface-500">Side-by-side metrics across vendors</p>
+    <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
+      <header>
+        <h1 className="text-2xl font-semibold text-brand-navy">Hourly Insights</h1>
+        <p className="text-sm text-surface-500 mt-1">
+          When customers actually pick up — by hour, by weekday, by day×hour, by vendor, by campaign.
+          All times in IST.
+        </p>
+      </header>
+
+      <FilterBar filters={filters} onChange={setFilters} onExport={handleExport} />
+
+      {/* Top KPI strip */}
+      <HourlyKpiStrip data={data?.hour_breakdown || []} />
+
+      {/* Headline visual: 7×24 heatmap */}
+      <HeatmapDowHour data={data?.heatmap || []} />
+
+      {/* Hour rollup + DOW rollup, side by side on desktop */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <HourDetail data={data?.hour_breakdown || []} />
+        <DowChart   data={data?.dow_breakdown  || []} />
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead className="bg-surface-50">
-            <tr className="text-left text-xs uppercase tracking-wider text-surface-500">
-              <th className="px-5 py-3 font-medium">Vendor</th>
-              <th className="px-3 py-3 font-medium text-right">Total dials</th>
-              <th className="px-3 py-3 font-medium text-right">Connected</th>
-              <th className="px-3 py-3 font-medium text-right">Avg. duration</th>
-              <th className="px-3 py-3 font-medium text-right">Engaged</th>
-              <th className="px-3 py-3 font-medium text-right">Interested</th>
-              <th className="px-5 py-3 font-medium text-right">Follow-up</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.map(v => (
-              <tr key={v.vendor_id} className="border-t border-surface-100 hover:bg-surface-50">
-                <td className="px-5 py-3 font-medium text-brand-navy">{v.vendor_name}</td>
-                <td className="px-3 py-3 text-right tabular-nums text-surface-600">
-                  {fmt.int(v.total_calls)}
-                </td>
-                <td className="px-3 py-3 text-right tabular-nums">
-                  <span className="font-medium">{fmt.int(v.connected_calls)}</span>
-                  <span className="text-surface-500 ml-1.5 text-xs">
-                    ({fmt.pct(v.connection_rate)})
-                  </span>
-                </td>
-                <td className="px-3 py-3 text-right tabular-nums">
-                  {fmt.duration(v.avg_duration_seconds)}
-                </td>
-                <td className="px-3 py-3 text-right tabular-nums">
-                  {fmt.pct(v.engagement_rate)}
-                </td>
-                <td className="px-3 py-3 text-right tabular-nums">
-                  {fmt.pct(v.interest_rate)}
-                </td>
-                <td className="px-5 py-3 text-right tabular-nums">
-                  {fmt.pct(v.follow_up_rate)}
-                </td>
-              </tr>
-            ))}
-            {!data.length && (
-              <tr>
-                <td colSpan={7} className="text-center py-8 text-surface-500 text-sm">
-                  {isLoading
-                    ? 'Loading…'
-                    : isError
-                    ? 'Could not load vendor data. Try refreshing.'
-                    : 'No vendor activity in this window.'}
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+
+      {/* Per-vendor split */}
+      <HourByVendor data={data?.by_vendor || []} />
+
+      {/* Per-campaign split */}
+      <HourByCampaign data={data?.by_campaign || []} />
+
+      {/* Auto-narrative observations */}
+      <InsightsPanel
+        insights={narrative}
+        subtitle="Auto-generated observations from this date range"
+      />
     </div>
   );
 }
