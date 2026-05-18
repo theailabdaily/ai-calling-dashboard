@@ -26,18 +26,44 @@ EXCLUDED_VENDOR_REQUEST_IDS: set[str] = {
 }
 
 
-# Hard inclusion list of vendor_agent_ids we actually care about. Anything from
-# an agent NOT in this set is silently dropped at ingest time — both at the
-# agent sync (upsert_agent) and at the call sync (upsert_call). This prevents
-# Hunar's POC test calls (using their own test agents like UPSC-TOFU, UPS-DNP)
-# from polluting our dashboard with phantom 1-lead "campaigns".
+# ---------------------------------------------------------------------------
+# Allowlist (DB-driven)
+# ---------------------------------------------------------------------------
+# Agents are allowed to ingest IFF they have a product_line_id set on their row
+# in the `agents` table. This means adding a new product line + agent is a pure
+# SQL operation — no code deploys needed. Fail-closed by design: if an agent
+# row doesn't exist or has NULL product_line_id, calls from it are silently
+# dropped.
 #
-# Fail-closed by design: a new agent created on Hunar's side will NOT auto-
-# appear here. When we add a real second agent for our team (e.g. Banking,
-# CTET), we extend this set explicitly.
-ALLOWED_VENDOR_AGENT_IDS: set[str] = {
-    "7448ffa2-0073-47b0-8c63-8073939b2bda",  # UGC NET Agent (Hindi) — the only one we run
-}
+# Adding a new agent:
+#   1. INSERT INTO product_lines (slug, name) VALUES ('banking', 'Banking');
+#   2. INSERT INTO agents (vendor_id, vendor_agent_id, name, product_line_id) VALUES
+#      (<hunar_vendor_id>, '<new_agent_uuid>', 'Banking - TOFU', <banking_id>);
+#   3. Next cron run picks up calls from this agent automatically.
+async def _is_allowed_agent(db: AsyncSession, vendor_id: UUID, vendor_agent_id: str) -> bool:
+    """An agent is allowed iff a row exists in `agents` with a non-null product_line_id."""
+    res = await db.execute(
+        select(Agent.id).where(
+            Agent.vendor_id == vendor_id,
+            Agent.vendor_agent_id == vendor_agent_id,
+            Agent.product_line_id.is_not(None),
+        )
+    )
+    return res.first() is not None
+
+
+async def _is_excluded_test_number(db: AsyncSession, mobile_number: str | None) -> bool:
+    """Test calls (e.g. Hunar POC dialing their own number) get filtered here."""
+    if not mobile_number:
+        return False
+    # excluded_test_numbers is a small ops table (~single-digit rows) managed via SQL.
+    # No ORM model exists for it — use a parameterized text query.
+    from sqlalchemy import text
+    res = await db.execute(
+        text("SELECT 1 FROM excluded_test_numbers WHERE mobile_number = :mn LIMIT 1"),
+        {"mn": mobile_number},
+    )
+    return res.first() is not None
 
 
 async def get_vendor_by_slug(db: AsyncSession, slug: str) -> Vendor | None:
@@ -49,12 +75,18 @@ async def get_vendor_by_slug(db: AsyncSession, slug: str) -> Vendor | None:
 # Agents
 # ---------------------------------------------------------------------------
 async def upsert_agent(db: AsyncSession, vendor_id: UUID, n: NormalizedAgent) -> UUID | None:
-    if n.vendor_agent_id not in ALLOWED_VENDOR_AGENT_IDS:
+    """
+    Update existing agent rows with fresh data from vendor sync.
+    Does NOT create new agents — they must be pre-seeded with a product_line_id
+    via SQL before any of their calls can ingest. This is fail-closed.
+    """
+    if not await _is_allowed_agent(db, vendor_id, n.vendor_agent_id):
         logger.debug(
-            "skipping non-allowed agent vendor_agent_id=%s name=%s",
+            "skipping agent (no product_line_id) vendor_agent_id=%s name=%s",
             n.vendor_agent_id, n.name,
         )
         return None
+    # Agent row exists and is allowed — refresh its data fields.
     stmt = pg_insert(Agent).values(
         vendor_id=vendor_id,
         vendor_agent_id=n.vendor_agent_id,
@@ -161,10 +193,19 @@ async def upsert_call(db: AsyncSession, vendor_id: UUID, n: NormalizedCall) -> U
         logger.debug("skipping excluded request_id=%s call_id=%s", n.vendor_request_id, n.vendor_call_id)
         return None
 
-    if n.vendor_agent_id and n.vendor_agent_id not in ALLOWED_VENDOR_AGENT_IDS:
+    # Skip calls from agents not mapped to a product line (fail-closed).
+    if n.vendor_agent_id and not await _is_allowed_agent(db, vendor_id, n.vendor_agent_id):
         logger.debug(
             "skipping call from non-allowed agent vendor_agent_id=%s call_id=%s",
             n.vendor_agent_id, n.vendor_call_id,
+        )
+        return None
+
+    # Skip test calls (Hunar POC dialing their own number, etc).
+    if await _is_excluded_test_number(db, n.mobile_number):
+        logger.debug(
+            "skipping test call to excluded number %s call_id=%s",
+            n.mobile_number, n.vendor_call_id,
         )
         return None
 
