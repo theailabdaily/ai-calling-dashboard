@@ -49,7 +49,7 @@ export default function AgentsPage() {
   }));
 
   return (
-    <div className="p-6 space-y-5 max-w-[1400px]">
+    <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
       <header>
         <h1 className="text-2xl font-semibold text-brand-navy">Agent performance</h1>
         <p className="text-sm text-surface-500 mt-1">
