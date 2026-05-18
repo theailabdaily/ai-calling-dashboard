@@ -77,6 +77,19 @@ export function middleware(req: NextRequest) {
       headers: { 'WWW-Authenticate': 'Basic realm="Testbook AI Calling Analytics"' },
     });
   }
+
+  // Picker route: tag it so the root layout knows to skip the sidebar.
+  // Sidebar showing on /select is weird because no product line is selected yet.
+  if (pathname === '/select') {
+    return NextResponse.next({
+      request: {
+        headers: new Headers({
+          ...Object.fromEntries(req.headers),
+          'x-is-picker': '1',
+        }),
+      },
+    });
+  }
   return NextResponse.next();
 }
 
