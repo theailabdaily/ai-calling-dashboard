@@ -12,6 +12,7 @@ import InsightsPanel from '@/components/ui/insights-panel';
 import { api } from '@/lib/api';
 import { hourlyInsights as buildHourlyInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
+import { useRequireProductLine } from '@/lib/use-product-line';
 
 const initialFilters: Filters = {
   start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
@@ -21,6 +22,8 @@ const initialFilters: Filters = {
 };
 
 export default function HourlyInsightsPage() {
+  const ready = useRequireProductLine();
+
   const [filters, setFilters] = useState<Filters>(initialFilters);
 
   const insights = useQuery({
@@ -31,6 +34,9 @@ export default function HourlyInsightsPage() {
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
   const data = insights.data;
   const narrative = buildHourlyInsights(data);
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
