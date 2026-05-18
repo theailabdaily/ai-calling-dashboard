@@ -5,6 +5,18 @@ export type Vendor = {
   is_active: boolean;
 };
 
+export type ProductLineCard = {
+  slug: string;
+  name: string;
+  description: string | null;
+  color: string | null;
+  agent_count: number;
+  total_calls: number;
+  total_campaigns: number;
+  last_call_at: string | null;
+  status: 'live' | 'idle' | 'not_started';
+};
+
 export type Campaign = {
   id: string;
   name: string;
