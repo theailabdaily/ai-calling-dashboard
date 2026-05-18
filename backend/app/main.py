@@ -9,7 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import agents, calls, dod_leads, exports, hourly, ingestion, internal, ledger, lookup, overview, vendors
+from app.api import agents, calls, dod_leads, exports, hourly, ingestion, internal, ledger, lookup, overview, product_lines, vendors
 from app.config import get_settings
 from app.jobs.sync import sync_all_vendors
 
@@ -52,6 +52,7 @@ app.add_middleware(
 
 app.include_router(overview.router)
 app.include_router(vendors.router)
+app.include_router(product_lines.router)
 app.include_router(calls.router)
 app.include_router(agents.router)
 app.include_router(exports.router)
