@@ -27,6 +27,7 @@ def parse_filters(
     vendor_ids: list[str] | None = Query(None),
     campaign_ids: list[str] | None = Query(None),
     agent_ids: list[str] | None = Query(None),
+    product_line: str | None = Query(None, description="Filter to one product line by slug (e.g. 'ugc-net', 'upsc')"),
 ) -> MetricFilters:
     if not start or not end:
         ds, de = default_window()
@@ -38,4 +39,5 @@ def parse_filters(
         vendor_ids=_parse_uuid_list(vendor_ids),
         campaign_ids=_parse_uuid_list(campaign_ids),
         agent_ids=_parse_uuid_list(agent_ids),
+        product_line_slug=product_line.strip() if product_line and product_line.strip() else None,
     )
