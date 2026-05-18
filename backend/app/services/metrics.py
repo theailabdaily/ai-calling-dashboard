@@ -47,7 +47,7 @@ from uuid import UUID
 from sqlalchemy import and_, case, desc, distinct, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import CallLog, Campaign, Vendor
+from app.models import CallLog, Campaign, Vendor, Agent, ProductLine
 
 
 @dataclass
@@ -57,6 +57,7 @@ class MetricFilters:
     vendor_ids: list[UUID] | None = None
     campaign_ids: list[UUID] | None = None
     agent_ids: list[UUID] | None = None
+    product_line_slug: str | None = None  # filters via agents.product_line_id → product_lines.slug
 
     def apply(self, stmt):
         conds = []
@@ -74,6 +75,15 @@ class MetricFilters:
             conds.append(CallLog.campaign_id.in_(self.campaign_ids))
         if self.agent_ids:
             conds.append(CallLog.agent_id.in_(self.agent_ids))
+        if self.product_line_slug:
+            # Resolve slug → agent_ids via a correlated subquery. Cheaper than
+            # forcing every metric query to JOIN agents+product_lines.
+            conds.append(
+                CallLog.agent_id.in_(
+                    select(Agent.id).join(ProductLine, ProductLine.id == Agent.product_line_id)
+                    .where(ProductLine.slug == self.product_line_slug)
+                )
+            )
         if conds:
             stmt = stmt.where(and_(*conds))
         return stmt
