@@ -9,6 +9,7 @@ import InsightsPanel from '@/components/ui/insights-panel';
 import { api } from '@/lib/api';
 import { vendorInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
+import { useRequireProductLine } from '@/lib/use-product-line';
 
 const initialFilters: Filters = {
   start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
@@ -27,6 +28,8 @@ const METRICS = [
 type MetricKey = typeof METRICS[number]['key'];
 
 export default function VendorsPage() {
+  const ready = useRequireProductLine();
+
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [metric, setMetric] = useState<MetricKey>('connection_rate');
 
@@ -35,6 +38,9 @@ export default function VendorsPage() {
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
   const insights = vendorInsights(vcomp.data, cbreak.data);
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
