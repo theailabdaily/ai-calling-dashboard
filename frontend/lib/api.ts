@@ -2,11 +2,32 @@ import type {
   Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow,
   DodLeadsResponse, Filters,
   FunnelStage, HourBucket, HourlyInsights, LedgerEntry, LedgerEntryInput, LedgerEntryType, LedgerListResponse,
-  LedgerLiveStats, LookupResult, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, TimeBucket,
+  LedgerLiveStats, LookupResult, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, ProductLineCard, TimeBucket,
   TriggerCampaignRequest, TriggerCampaignResponse, Vendor, VendorRow,
 } from '@/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || '';
+
+// Cookie name read by every API call to scope queries to one product line.
+// Set by the picker page, read here, sent to backend as ?product_line=<slug>.
+// Server-rendered pages won't have document; that's fine — they just send no scope.
+export const PRODUCT_LINE_COOKIE = 'product_line_slug';
+
+export function getActiveProductLine(): string | null {
+  if (typeof document === 'undefined') return null;
+  const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${PRODUCT_LINE_COOKIE}=([^;]+)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+export function setActiveProductLine(slug: string | null): void {
+  if (typeof document === 'undefined') return;
+  if (slug === null) {
+    document.cookie = `${PRODUCT_LINE_COOKIE}=; path=/; max-age=0; SameSite=Lax`;
+  } else {
+    // 90 days. Lax so it survives normal navigation.
+    document.cookie = `${PRODUCT_LINE_COOKIE}=${encodeURIComponent(slug)}; path=/; max-age=${60 * 60 * 24 * 90}; SameSite=Lax`;
+  }
+}
 
 function buildQuery(f: Filters): string {
   const p = new URLSearchParams();
@@ -14,11 +35,22 @@ function buildQuery(f: Filters): string {
   p.set('end', f.end.toISOString());
   for (const v of f.vendor_ids) p.append('vendor_ids', v);
   for (const c of f.campaign_ids) p.append('campaign_ids', c);
+  const pl = getActiveProductLine();
+  if (pl) p.set('product_line', pl);
   return p.toString();
 }
 
 async function jget<T>(path: string): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, { cache: 'no-store' });
+  // Auto-append product_line to any path that doesn't already include it.
+  // Belt-and-suspenders — buildQuery already injects, but some calls bypass
+  // it (e.g. simple list endpoints). The scope cookie is the source of truth.
+  let finalPath = path;
+  const pl = getActiveProductLine();
+  if (pl && !path.includes('product_line=')) {
+    const sep = path.includes('?') ? '&' : '?';
+    finalPath = `${path}${sep}product_line=${encodeURIComponent(pl)}`;
+  }
+  const r = await fetch(`${API_BASE}${finalPath}`, { cache: 'no-store' });
   if (!r.ok) throw new Error(`${path} → ${r.status}`);
   return r.json();
 }
@@ -27,6 +59,7 @@ export const api = {
   vendors: () => jget<Vendor[]>('/api/vendors'),
   campaigns: () => jget<Campaign[]>('/api/campaigns'),
   agents: () => jget<Agent[]>('/api/agents'),
+  productLines: () => jget<ProductLineCard[]>('/api/product-lines'),
 
   overviewMetrics: (f: Filters) =>
     jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
