@@ -8,6 +8,7 @@ import InsightsPanel from '@/components/ui/insights-panel';
 import { api, fmt } from '@/lib/api';
 import { agentInsights } from '@/lib/insights';
 import type { AgentPerformanceRow, Filters } from '@/types';
+import { useRequireProductLine } from '@/lib/use-product-line';
 
 const initialFilters: Filters = {
   start: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
@@ -27,6 +28,8 @@ const SORT_OPTIONS = [
 type SortKey = typeof SORT_OPTIONS[number]['key'];
 
 export default function AgentsPage() {
+  const ready = useRequireProductLine();
+
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [sortBy, setSortBy] = useState<SortKey>('interest_rate');
 
@@ -47,6 +50,9 @@ export default function AgentsPage() {
     'Connection': +(r.connection_rate * 100).toFixed(1),
     'Interest':   +(r.interest_rate * 100).toFixed(1),
   }));
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
