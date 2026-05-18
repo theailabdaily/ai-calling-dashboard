@@ -17,6 +17,15 @@ export type ProductLineCard = {
   status: 'live' | 'idle' | 'not_started';
 };
 
+export type AuthEventRow = {
+  id: string;
+  email: string;
+  event: 'signin_success' | 'signin_blocked_non_testbook' | 'signout' | 'signin_error' | string;
+  ip: string | null;
+  user_agent: string | null;
+  occurred_at: string;
+};
+
 export type Campaign = {
   id: string;
   name: string;
