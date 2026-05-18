@@ -4,6 +4,7 @@ import Image from 'next/image';
 import { usePathname } from 'next/navigation';
 import { LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw, ScrollText, CalendarDays, Search, Shuffle } from 'lucide-react';
 import { cn } from '@/lib/api';
+import ProductLineSwitcher from './product-line-switcher';
 
 const NAV = [
   { href: '/',                label: 'Overview',          icon: LayoutDashboard },
@@ -37,6 +38,8 @@ export default function Sidebar() {
         />
         <p className="text-xs text-white/60 mt-3 leading-tight">AI Calling Analytics</p>
       </div>
+
+      <ProductLineSwitcher />
 
       <nav className="flex-1 py-4 px-3 overflow-y-auto">
         {NAV.map(item => {
