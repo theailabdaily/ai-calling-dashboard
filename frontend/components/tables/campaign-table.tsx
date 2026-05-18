@@ -2,45 +2,53 @@
 import type { CampaignRow } from '@/types';
 import { fmt } from '@/lib/api';
 
-export default function CampaignTable({ data }: { data: CampaignRow[] }) {
+type Props = {
+  data: CampaignRow[];
+  isLoading?: boolean;
+  isError?: boolean;
+};
+
+export default function CampaignTable({ data, isLoading, isError }: Props) {
   return (
     <div className="card overflow-hidden">
-      <div className="px-5 py-4 border-b border-surface-200 flex items-baseline justify-between">
-        <div>
+      <div className="px-5 py-4 border-b border-surface-200 flex items-baseline justify-between gap-3">
+        <div className="min-w-0">
           <h3 className="text-sm font-semibold text-brand-navy">Campaign breakdown</h3>
-          <p className="text-xs text-surface-500">
-            Performance by campaign — <span className="font-medium">Leads</span> = unique phones,{' '}
-            <span className="font-medium">Dials</span> = total attempts incl. retries
+          <p className="text-xs text-surface-500 mt-0.5">
+            <span className="font-medium">Leads</span> = unique phones called.{' '}
+            <span className="font-medium">Dials</span> = total attempts incl. retries.
           </p>
         </div>
-        <span className="text-xs text-surface-500">{data.length} campaigns</span>
+        <span className="text-xs text-surface-500 whitespace-nowrap shrink-0">
+          {data.length} campaign{data.length === 1 ? '' : 's'}
+        </span>
       </div>
       <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
         <table className="w-full text-sm">
-          <thead className="sticky top-0">
-            <tr className="text-left text-xs uppercase tracking-wider text-surface-500 bg-surface-50">
+          <thead className="sticky top-0 z-10 bg-surface-50">
+            <tr className="text-left text-xs uppercase tracking-wider text-surface-500">
               <th className="px-5 py-3 font-medium">Campaign</th>
               <th
                 className="px-3 py-3 font-medium text-right"
-                title="Unique phone numbers in this campaign — the pool being called"
+                title="Unique phone numbers in this campaign"
               >
                 Leads
               </th>
               <th
                 className="px-3 py-3 font-medium text-right"
-                title="Total dial attempts including retries"
+                title="Total dial attempts (includes retries)"
               >
                 Dials
               </th>
               <th
                 className="px-3 py-3 font-medium text-right"
-                title="Unique leads connected (% of Leads)"
+                title="Unique leads connected. % shown is of Leads."
               >
                 Connected
               </th>
               <th
                 className="px-5 py-3 font-medium text-right"
-                title="Unique leads marked interested (% of Connected)"
+                title="Unique leads marked interested. % shown is of Connected."
               >
                 Interested
               </th>
@@ -88,7 +96,11 @@ export default function CampaignTable({ data }: { data: CampaignRow[] }) {
                   colSpan={5}
                   className="text-center py-8 text-surface-500 text-sm"
                 >
-                  No campaigns in this window.
+                  {isLoading
+                    ? 'Loading…'
+                    : isError
+                    ? 'Could not load campaign data. Try refreshing.'
+                    : 'No campaigns in this window.'}
                 </td>
               </tr>
             )}
