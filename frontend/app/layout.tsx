@@ -38,12 +38,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // Middleware sets x-is-lookup-host: 1 on requests coming from the
   // lookup hostname. We use that to skip sidebar/mobile-nav entirely so
   // BDAs see a standalone tool, not the analytics dashboard.
-  // Similarly, x-is-picker: 1 is set on the /select route so the picker
-  // renders full-screen without the sidebar (no product line picked yet).
+  // Similarly:
+  //   x-is-picker: 1 on /select  → picker is full-screen, no sidebar
+  //   x-is-login:  1 on /login   → login is full-screen, no sidebar
   const h = headers();
   const isLookupHost = h.get('x-is-lookup-host') === '1';
   const isPicker = h.get('x-is-picker') === '1';
-  const hideShell = isLookupHost || isPicker;
+  const isLogin = h.get('x-is-login') === '1';
+  const hideShell = isLookupHost || isPicker || isLogin;
 
   return (
     <html lang="en">
