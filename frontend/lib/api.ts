@@ -1,5 +1,5 @@
 import type {
-  Agent, AgentPerformanceRow, AttemptsDistribution, CallDetail, CallListPage, Campaign, CampaignRow,
+  Agent, AgentPerformanceRow, AttemptsDistribution, AuthEventRow, CallDetail, CallListPage, Campaign, CampaignRow,
   DodLeadsResponse, Filters,
   FunnelStage, HourBucket, HourlyInsights, LedgerEntry, LedgerEntryInput, LedgerEntryType, LedgerListResponse,
   LedgerLiveStats, LookupResult, OutcomeDistribution, OverviewMetrics, PendingCampaignsResponse, ProductLineCard, TimeBucket,
@@ -60,6 +60,8 @@ export const api = {
   campaigns: () => jget<Campaign[]>('/api/campaigns'),
   agents: () => jget<Agent[]>('/api/agents'),
   productLines: () => jget<ProductLineCard[]>('/api/product-lines'),
+  adminAuthEvents: (limit = 100) =>
+    jget<AuthEventRow[]>(`/api/admin/auth-events?limit=${limit}`),
 
   overviewMetrics: (f: Filters) =>
     jget<OverviewMetrics>(`/api/overview/metrics?${buildQuery(f)}`),
