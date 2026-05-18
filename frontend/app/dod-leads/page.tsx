@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import { api, fmt } from '@/lib/api';
 import type { DodLeadCampaign, Filters } from '@/types';
+import { useRequireProductLine } from '@/lib/use-product-line';
 
 // Sales-action bucket → matching funnel_stage URL param + display name.
 // Single source of truth: changing this updates BOTH the column header AND
@@ -148,6 +149,8 @@ function rangeLink(startIso: string, endIso: string, funnel_stage: string): stri
 }
 
 export default function DodLeadsPage() {
+  const ready = useRequireProductLine();
+
   const [expanded, setExpanded] = useState<string | null>(null);
   const [range, setRange]       = useState<RangeKey>('last_30');
   const [view, setView]         = useState<ViewMode>('date');
@@ -492,6 +495,9 @@ export default function DodLeadsPage() {
   };
 
   const toggleExpand = (id: string) => setExpanded(prev => (prev === id ? null : id));
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
 
   return (
     <div className="p-4 md:p-6 space-y-4 max-w-[1400px] mx-auto">
