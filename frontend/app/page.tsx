@@ -16,6 +16,7 @@ import InsightsPanel from '@/components/ui/insights-panel';
 import FunnelStageDrawer from '@/components/calls/funnel-stage-drawer';
 import CallDetailDrawer from '@/components/calls/call-detail-drawer';
 import { api, fmt } from '@/lib/api';
+import { useRequireProductLine } from '@/lib/use-product-line';
 import { overviewInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
 
@@ -58,21 +59,28 @@ const T = {
 };
 
 export default function OverviewPage() {
+  const ready = useRequireProductLine();
+
   const [filters, setFilters] = useState<Filters>(initialFilters);
   const [stage, setStage] = useState<{ key: FunnelStageKey; label: string } | null>(null);
   const [selectedCallId, setSelectedCallId] = useState<string | null>(null);
 
-  const metrics  = useQuery({ queryKey: ['metrics', filters],  queryFn: () => api.overviewMetrics(filters) });
-  const series   = useQuery({ queryKey: ['series', filters],   queryFn: () => api.timeSeries(filters) });
-  const funnel   = useQuery({ queryKey: ['funnel', filters],   queryFn: () => api.funnel(filters) });
-  const vcomp    = useQuery({ queryKey: ['vcomp', filters],    queryFn: () => api.vendorComparison(filters) });
-  const outcomes = useQuery({ queryKey: ['outcomes', filters], queryFn: () => api.outcomes(filters) });
-  const attempts = useQuery({ queryKey: ['attempts', filters], queryFn: () => api.attemptsDistribution(filters) });
+  const metrics  = useQuery({ queryKey: ['metrics', filters],  queryFn: () => api.overviewMetrics(filters), enabled: ready });
+  const series   = useQuery({ queryKey: ['series', filters],   queryFn: () => api.timeSeries(filters),     enabled: ready });
+  const funnel   = useQuery({ queryKey: ['funnel', filters],   queryFn: () => api.funnel(filters),         enabled: ready });
+  const vcomp    = useQuery({ queryKey: ['vcomp', filters],    queryFn: () => api.vendorComparison(filters), enabled: ready });
+  const outcomes = useQuery({ queryKey: ['outcomes', filters], queryFn: () => api.outcomes(filters),       enabled: ready });
+  const attempts = useQuery({ queryKey: ['attempts', filters], queryFn: () => api.attemptsDistribution(filters), enabled: ready });
 
   const handleExport = () => window.open(api.exportCallsUrl(filters), '_blank');
   const insights = overviewInsights(metrics.data, funnel.data, vcomp.data, series.data);
 
   const m = metrics.data;
+
+  // Don't render dashboard skeleton until we know which product line we're scoped to
+  if (!ready) {
+    return null;
+  }
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
