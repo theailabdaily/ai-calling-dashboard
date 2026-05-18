@@ -15,6 +15,7 @@ import { StatusBadge } from '@/components/ui/badge';
 import { api, fmt } from '@/lib/api';
 import { callsInsights } from '@/lib/insights';
 import type { Filters } from '@/types';
+import { useRequireProductLine } from '@/lib/use-product-line';
 
 type SortKey = 'when' | 'duration' | 'status';
 type SortOrder = 'asc' | 'desc';
@@ -475,6 +476,11 @@ function CallsPageSkeleton() {
 }
 
 export default function CallsPage() {
+  const ready = useRequireProductLine();
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
+
   return (
     <Suspense fallback={<CallsPageSkeleton />}>
       <CallsPageInner />
