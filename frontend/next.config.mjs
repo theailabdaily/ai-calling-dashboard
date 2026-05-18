@@ -3,18 +3,26 @@ const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
     const api = process.env.NEXT_PUBLIC_API_BASE || 'http://localhost:8000';
-    // CRITICAL: /api/auth/* is owned by NextAuth and must NOT be rewritten to the
-    // backend. We do that by using `beforeFiles` (handled before route lookup)
-    // with a negative lookahead so any path that ISN'T /api/auth/* gets sent on.
+    // Why `fallback` and not `afterFiles`:
     //
-    // Order matters in Next.js rewrites:
-    //   beforeFiles → checked before route resolution (lets us "claim" /api/auth/* for NextAuth)
-    //   afterFiles  → checked after, only if no matching route was found
-    // We use afterFiles here because Next.js will look up its own /api/auth/[...nextauth]
-    // route handler first; only if no route matches will the rewrite run. That naturally
-    // gives NextAuth precedence over the proxy.
+    // Next.js rewrite ordering is:
+    //   1. beforeFiles    — match before static files / pages / routes
+    //   2. static files   — /public/*
+    //   3. pages          — app/page.tsx, app/login/page.tsx etc.
+    //   4. afterFiles     — match before DYNAMIC routes
+    //   5. dynamic routes — [slug], [...catchAll], including app/api/auth/[...nextauth]
+    //   6. fallback       — match only if no route at all
+    //
+    // `/api/auth/[...nextauth]/route.ts` is a dynamic catch-all (step 5). If we
+    // put the proxy rewrite in afterFiles (step 4), the rewrite fires FIRST and
+    // /api/auth/csrf gets forwarded to the FastAPI backend → 404.
+    //
+    // Putting the proxy in `fallback` makes it run last. NextAuth's catch-all
+    // matches /api/auth/* first and serves the handler. Everything else
+    // (/api/product-lines, /api/overview/*, etc.) has no matching Next route,
+    // falls through, and gets proxied to FastAPI.
     return {
-      afterFiles: [
+      fallback: [
         { source: '/api/:path*', destination: `${api}/api/:path*` },
       ],
     };
