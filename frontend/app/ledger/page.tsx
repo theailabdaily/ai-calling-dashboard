@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 
 import { api, fmt } from '@/lib/api';
+import { useRequireProductLine } from '@/lib/use-product-line';
 import {
   LEDGER_ENTRY_TYPES,
   type LedgerEntry,
@@ -33,6 +34,8 @@ const TYPE_OPTIONS: { value: LedgerEntryType | ''; label: string }[] = [
 ];
 
 export default function LedgerPage() {
+  const ready = useRequireProductLine();
+
   const qc = useQueryClient();
   const [typeFilter, setTypeFilter] = useState<LedgerEntryType | ''>('');
   const [page, setPage] = useState(1);
@@ -87,6 +90,9 @@ export default function LedgerPage() {
     });
     setShowForm(true);
   };
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
 
   return (
     <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1200px] mx-auto">
