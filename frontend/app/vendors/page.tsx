@@ -37,7 +37,7 @@ export default function VendorsPage() {
   const insights = vendorInsights(vcomp.data, cbreak.data);
 
   return (
-    <div className="p-6 space-y-5 max-w-[1400px]">
+    <div className="p-4 md:p-6 space-y-4 md:space-y-5 max-w-[1400px] mx-auto">
       <header>
         <h1 className="text-2xl font-semibold text-brand-navy">Vendor analysis</h1>
         <p className="text-sm text-surface-500 mt-1">
@@ -49,29 +49,40 @@ export default function VendorsPage() {
 
       <InsightsPanel insights={insights} subtitle="Vendor + campaign-level observations" />
 
-      <VendorTable data={vcomp.data || []} />
+      <VendorTable data={vcomp.data || []} isLoading={vcomp.isLoading} isError={vcomp.isError} />
 
-      {/* Metric selector for the bar chart */}
-      <div className="card p-4 flex flex-wrap items-center gap-2">
-        <span className="text-sm font-medium text-surface-700 mr-2">Compare on:</span>
-        {METRICS.map(m => (
-          <button
-            key={m.key}
-            onClick={() => setMetric(m.key)}
-            className={
-              metric === m.key
-                ? 'btn bg-brand-navy text-white'
-                : 'btn-outline'
-            }
-          >
-            {m.label}
-          </button>
-        ))}
+      {/* Metric selector + bar chart grouped — the selector controls the chart below */}
+      <div className="card px-5 py-4">
+        <div
+          role="group"
+          aria-label="Compare vendors on metric"
+          className="flex flex-wrap items-center gap-2"
+        >
+          <span className="text-sm font-medium text-surface-700 mr-2">Compare on:</span>
+          {METRICS.map(m => {
+            const active = metric === m.key;
+            return (
+              <button
+                key={m.key}
+                type="button"
+                aria-pressed={active}
+                onClick={() => setMetric(m.key)}
+                className={
+                  active
+                    ? 'btn bg-brand-navy text-white'
+                    : 'btn-outline'
+                }
+              >
+                {m.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <VendorBars data={vcomp.data || []} metric={metric} />
 
-      <CampaignTable data={cbreak.data || []} />
+      <CampaignTable data={cbreak.data || []} isLoading={cbreak.isLoading} isError={cbreak.isError} />
     </div>
   );
 }
