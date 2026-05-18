@@ -24,11 +24,15 @@ export default function ProductLineSwitcher() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [activeSlug, setActiveSlug] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Hydrate from cookie after mount (SSR has no cookie)
+  // Hydrate from cookie after mount (SSR has no cookie).
+  // `hydrated` flag is separate from activeSlug so we can render a skeleton
+  // during the SSR→client cookie-read window without it flashing in/out.
   useEffect(() => {
     setActiveSlug(getActiveProductLine());
+    setHydrated(true);
   }, []);
 
   // Close dropdown on outside click
@@ -41,10 +45,11 @@ export default function ProductLineSwitcher() {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
+  // Prefetch the list so the dropdown opens instantly. Cheap call.
   const { data } = useQuery({
     queryKey: ['product-lines-switcher'],
     queryFn: api.productLines,
-    enabled: open, // Only fetch when user opens dropdown — cheap
+    enabled: hydrated && !!activeSlug,
     staleTime: 5 * 60 * 1000, // 5 min — these change rarely
   });
 
@@ -62,10 +67,20 @@ export default function ProductLineSwitcher() {
     router.push('/select');
   }
 
-  if (!activeSlug) {
-    // No scope set — sidebar is being rendered before redirect runs.
-    // Don't show anything; the page will redirect to /select shortly.
-    return null;
+  // Pre-hydration skeleton — keep the slot in the layout so the sidebar
+  // doesn't "jump" once the cookie is read.
+  if (!hydrated || !activeSlug) {
+    return (
+      <div className="px-3 pt-2.5 pb-2.5 border-b border-white/5">
+        <div className="w-full flex items-center gap-2 px-2.5 py-1.5 bg-white/[0.04] rounded-md">
+          <div className="w-7 h-7 rounded-md bg-white/10 shrink-0" />
+          <div className="flex-1 min-w-0 space-y-1">
+            <div className="h-2.5 w-20 bg-white/10 rounded" />
+            <div className="h-1.5 w-14 bg-white/5 rounded" />
+          </div>
+        </div>
+      </div>
+    );
   }
 
   // Best-effort label even before /api/product-lines responds — slug → Title
@@ -80,25 +95,27 @@ export default function ProductLineSwitcher() {
   const others = (data ?? []).filter(pl => pl.slug !== activeSlug);
 
   return (
-    <div ref={ref} className="px-3 pt-3 pb-2 relative">
+    <div ref={ref} className="px-3 pt-2.5 pb-2.5 border-b border-white/5 relative">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className="w-full flex items-center gap-2.5 px-2.5 py-2 bg-white/5 hover:bg-white/10 rounded-md transition-colors text-left"
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 bg-white/[0.04] hover:bg-white/[0.08] rounded-md transition-colors text-left"
       >
         <div
-          className="w-7 h-7 rounded-md flex items-center justify-center font-medium text-[12px] shrink-0"
+          className="w-7 h-7 rounded-md flex items-center justify-center font-semibold text-[11px] shrink-0"
           style={{ background: tint.bg, color: tint.fg }}
         >
           {initials(name)}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-[13px] font-medium text-white leading-tight truncate">{name}</p>
-          <p className="text-[10px] text-white/50 leading-tight mt-0.5">Current product line</p>
+          <p className="text-[12px] font-semibold text-white leading-tight truncate">{name}</p>
+          <p className="text-[9px] text-white/45 leading-tight mt-0.5 tracking-wide uppercase">
+            Workspace
+          </p>
         </div>
-        <ChevronDown size={14} className="text-white/60 shrink-0" />
+        <ChevronDown size={13} className="text-white/50 shrink-0" />
       </button>
 
       {open && (
@@ -108,7 +125,7 @@ export default function ProductLineSwitcher() {
         >
           {others.length > 0 ? (
             <>
-              <p className="text-[10px] uppercase tracking-wider text-white/40 px-2 py-1.5">
+              <p className="text-[9px] uppercase tracking-wider text-white/40 px-2 py-1.5">
                 Switch to
               </p>
               {others.map(pl => {
@@ -122,14 +139,16 @@ export default function ProductLineSwitcher() {
                     className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left hover:bg-white/10 transition-colors"
                   >
                     <div
-                      className="w-6 h-6 rounded flex items-center justify-center font-medium text-[11px]"
+                      className="w-6 h-6 rounded flex items-center justify-center font-semibold text-[10px]"
                       style={{ background: t.bg, color: t.fg }}
                     >
                       {initials(pl.name)}
                     </div>
-                    <span className="text-[13px] text-white flex-1">{pl.name}</span>
+                    <span className="text-[12px] text-white flex-1 font-medium">{pl.name}</span>
                     {pl.status === 'not_started' && (
-                      <span className="text-[10px] text-white/40">not started</span>
+                      <span className="text-[9px] text-white/40 tracking-wide uppercase">
+                        not started
+                      </span>
                     )}
                   </button>
                 );
@@ -146,10 +165,10 @@ export default function ProductLineSwitcher() {
             type="button"
             onClick={backToPicker}
             role="menuitem"
-            className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left hover:bg-white/10 transition-colors text-white/80"
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-left hover:bg-white/10 transition-colors text-white/75"
           >
-            <Grid3x3 size={13} />
-            <span className="text-[13px]">Back to picker</span>
+            <Grid3x3 size={12} />
+            <span className="text-[12px]">Back to picker</span>
           </button>
         </div>
       )}
