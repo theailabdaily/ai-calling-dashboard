@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import type { Agent, Campaign, Filters, Vendor } from '@/types';
+import { useRequireProductLine } from '@/lib/use-product-line';
 
 // =============================================================================
 // Lead Attribution — match dashboard leads against an external outcome CSV
@@ -825,6 +826,8 @@ function flattenPairs(pairs: MatchedPair[]): Record<string, unknown>[] {
 // =============================================================================
 
 export default function LeadAttributionPage() {
+  const ready = useRequireProductLine();
+
   // Dashboard fetch config
   const [dashboardRange, setDashboardRange] = useState<DashboardRange>('last_30');
   const [loadingDashboard, setLoadingDashboard] = useState(false);
@@ -1266,6 +1269,9 @@ export default function LeadAttributionPage() {
       }, 50);
     }, 50);
   };
+
+  // Hard scope gate — render nothing until we know the product line
+  if (!ready) return null;
 
   return (
     <div className="p-4 md:p-6 space-y-5 max-w-[1100px] mx-auto">
