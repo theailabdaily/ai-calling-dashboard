@@ -6,7 +6,7 @@ import {
   RotateCcw, Shuffle, FileSpreadsheet, AlertCircle, Database, Loader2,
   Check,
 } from 'lucide-react';
-import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip } from 'recharts';
+import { CartesianGrid, Cell, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip, XAxis, YAxis } from 'recharts';
 import { api } from '@/lib/api';
 import type { Agent, Campaign, Filters, Vendor } from '@/types';
 import { useRequireProductLine } from '@/lib/use-product-line';
@@ -2932,6 +2932,17 @@ function ResultsBlock({
         unmatchedSources={results.unmatchedSources}
       />
 
+      {/* Visualizations — moved to the bottom of the results so the tables /
+          preview / download buttons stay above the fold. Each card is default-
+          closed so it doesn't displace the rest of the page until requested.
+          Source share has Leads/Customers/Revenue donuts; Product share has
+          Customers/Revenue; Trend has a daily line chart for all three. */}
+      <Visualizations
+        results={results}
+        aSourceTotals={results.aSourceTotals}
+        bExtras={bExtras}
+      />
+
       {/* Inline previews — expandable cards that let the user spot-check
           matches without downloading. Each section is independently
           collapsible and paginated (25 rows per page). */}
@@ -3338,24 +3349,12 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount, aSourceTotals, bSource
 
   return (
     <div className="space-y-3 mt-3">
-      {/* Visual share — twin donut charts comparing each source's contribution
-          to total leads (left donut) vs total customers (right donut). Sources
-          with a wider customer slice than leads slice over-perform their share;
-          narrower customer slice = under-performer. Legend is interactive —
-          click any source to toggle it out of both donuts; percentages
-          recompute over the remaining sources. */}
-      {byA.length > 0 && (
-        <SourceShareChart
-          rows={byA}
-          title="Lead share vs customer share (File A)"
-          leftLabel="Leads"
-          rightLabel="Customers"
-        />
-      )}
       {/* Tables stacked vertically — A is 7 columns (after the CVR/Customers
           additions) and needs full width to breathe. B is 5 columns and
           could fit side-by-side, but stacking keeps things consistent and
-          gives both tables the same visual prominence. */}
+          gives both tables the same visual prominence. The visual donuts
+          chart that used to live here was moved to the bottom of the page
+          into the collapsible Visualizations section. */}
       <div className="space-y-3">
         {byA.length > 0 && <SourceTable title="By File A source (where leads came from)" rows={byA} kind="A" />}
         {byB.length > 0 && <SourceTable title="By File B source (where revenue landed)" rows={byB} kind="B" />}
@@ -3364,17 +3363,22 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount, aSourceTotals, bSource
   );
 }
 
-// Twin donut chart for comparing each source's % share of total leads vs
-// total customers. Color palette is deterministic by source order so toggling
-// doesn't reshuffle colors. The legend doubles as a filter — click to hide a
-// source, percentages recompute. Hovering a legend row highlights the matching
-// slice in both donuts simultaneously, so you can read "ah, this source has 60%
-// of leads but only 25% of customers — that's the low-CVR one" at a glance.
+
+// ============================================================================
+// Visualizations — collapsible bottom section with donut + line charts.
+// ============================================================================
+// Three independently collapsible cards, all default-closed so they don't
+// occupy vertical space until the user wants them:
+//   1. Source share: donuts for Leads/Customers/Revenue, pivoted by A source
+//   2. Product share: donuts for Customers/Revenue, pivoted by product (B-side)
+//   3. Trend over time: line chart with Leads/Customers/Revenue per day
 //
-// Performance: this is a render-only client component over a small array
-// (typically 2–10 sources). No memoization beyond React's defaults needed.
+// Each viz card has metric checkboxes so the user can show only what they care
+// about. Source/Product donuts also have a toggleable legend (click a source/
+// product to exclude it; percentages recompute on the remaining ones).
+
 const SOURCE_COLORS = [
-  '#E8345C', // brand pink — first source, usually the dominant one
+  '#E8345C', // brand pink — first source, usually dominant
   '#1B1A36', // brand navy
   '#10B981', // green
   '#F59E0B', // amber
@@ -3383,127 +3387,236 @@ const SOURCE_COLORS = [
   '#06B6D4', // cyan
   '#F472B6', // light pink
   '#84CC16', // lime
-  '#EF4444', // red — last resort, used only if 10+ sources
+  '#EF4444', // red
 ];
 
-function SourceShareChart({
-  rows, title, leftLabel, rightLabel,
-}: {
-  rows: { label: string; total: number; leads: number }[];
-  title: string;
-  leftLabel: string;
-  rightLabel: string;
-}) {
-  // Disabled sources are filtered out of the donuts. Set lives in component
-  // state so toggling rerenders instantly without touching parent state.
-  const [disabled, setDisabled] = useState<Set<string>>(new Set());
-  const [hoverLabel, setHoverLabel] = useState<string | null>(null);
+// Per-metric color used in trend line chart + checkbox swatches. These are
+// brand-consistent — Pink is the hero metric, Navy is for secondary, Emerald
+// for revenue (universally read as $).
+const METRIC_COLORS: Record<string, string> = {
+  leads: '#E8345C',
+  customers: '#1B1A36',
+  revenue: '#10B981',
+};
+const METRIC_LABELS: Record<string, string> = {
+  leads: 'Leads',
+  customers: 'Customers',
+  revenue: 'Revenue',
+};
 
-  // Stable color assignment — index in the input `rows` array drives the
-  // color, so toggling sources in/out never reshuffles. If we eventually
-  // sort rows in the parent, that ordering controls the palette.
+// Generic collapsible card. Default closed so the visualizations section
+// doesn't push the rest of the page down until the user opts in.
+function CollapsibleCard({
+  title, subtitle, defaultOpen = false, children,
+}: {
+  title: string;
+  subtitle?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="card overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full px-4 py-3 flex items-center justify-between hover:bg-surface-50/60 transition-colors text-left"
+        aria-expanded={open}
+      >
+        <div className="flex items-center gap-2">
+          {open ? <ChevronDown size={14} className="text-surface-500" /> : <ChevronRight size={14} className="text-surface-500" />}
+          <div>
+            <div className="text-sm font-semibold text-brand-navy">{title}</div>
+            {subtitle && <div className="text-[11px] text-surface-500 mt-0.5">{subtitle}</div>}
+          </div>
+        </div>
+        <span className="text-[10px] text-surface-400 uppercase tracking-wider">
+          {open ? 'Tap to collapse' : 'Tap to expand'}
+        </span>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 pt-1 border-t border-surface-100">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Row shape for MultiDonutChart. Each row is one slice (one source or one
+// product); values is a metric key → number map. The metric key list (passed
+// separately) determines which metrics are even POSSIBLE in this chart — not
+// every chart shows all 3 metrics (e.g. product view has no Leads).
+type DonutRow = { label: string; values: Record<string, number> };
+type MetricDef = {
+  key: string;                            // 'leads' | 'customers' | 'revenue'
+  label: string;                          // 'Leads' | 'Customers' | 'Revenue'
+  format: (n: number) => string;          // fmtInt or fmtINR
+};
+
+// Multi-metric donut chart with per-source toggleable legend AND per-metric
+// checkboxes. Replaces the old SourceShareChart — now generalized so it
+// works for both "by source" (3 metrics) and "by product" (2 metrics).
+function MultiDonutChart({
+  rows, metrics, sourceWord = 'Sources',
+}: {
+  rows: DonutRow[];
+  metrics: MetricDef[];
+  sourceWord?: string;  // 'Sources' or 'Products' — used in legend header
+}) {
+  // Disabled rows (hidden from donuts and percentage computation).
+  const [disabled, setDisabled] = useState<Set<string>>(new Set());
+  // Hovered row, used to dim other slices for visual emphasis.
+  const [hoverLabel, setHoverLabel] = useState<string | null>(null);
+  // Active metrics — defaults to all enabled. The user toggles checkboxes
+  // above the donuts to hide/show metric donuts.
+  const [activeMetrics, setActiveMetrics] = useState<Set<string>>(
+    () => new Set(metrics.map(m => m.key))
+  );
+
+  // Stable color assignment by input index — so toggling rows in/out never
+  // reshuffles colors. Same convention as the old chart.
   const colorMap = useMemo(() => {
     const m: Record<string, string> = {};
     rows.forEach((r, i) => { m[r.label] = SOURCE_COLORS[i % SOURCE_COLORS.length]; });
     return m;
   }, [rows]);
 
-  const visible = rows.filter(r => !disabled.has(r.label));
+  const visibleRows = rows.filter(r => !disabled.has(r.label));
+  const visibleMetrics = metrics.filter(m => activeMetrics.has(m.key));
 
-  // Recharts wants Array<{name, value}>. We compute two parallel datasets so
-  // each donut animates independently — and so the slice colors line up across
-  // donuts by source name (not by sort order, which differs).
-  const leadsData = visible.map(r => ({ name: r.label, value: r.total }));
-  const customersData = visible.map(r => ({ name: r.label, value: r.leads }));
-  const leadsTotal = leadsData.reduce((s, d) => s + d.value, 0);
-  const customersTotal = customersData.reduce((s, d) => s + d.value, 0);
+  // Per-metric totals across visible rows — used as the denominator for
+  // % share displayed in tooltips and the legend.
+  const totals = useMemo(() => {
+    const t: Record<string, number> = {};
+    for (const m of metrics) t[m.key] = visibleRows.reduce((s, r) => s + (r.values[m.key] ?? 0), 0);
+    return t;
+  }, [visibleRows, metrics]);
 
-  function toggle(label: string) {
+  function toggleRow(label: string) {
     setDisabled(prev => {
       const next = new Set(prev);
       if (next.has(label)) next.delete(label);
       else next.add(label);
-      // Guard against disabling every source — the chart would be empty,
-      // which is technically valid but visually confusing. Refuse the last
-      // toggle if it would empty the chart.
+      // Refuse to disable every row — empty chart is worse than confusing.
       if (next.size === rows.length) return prev;
       return next;
     });
   }
+  function toggleMetric(key: string) {
+    setActiveMetrics(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      // Refuse to disable every metric.
+      if (next.size === 0) return prev;
+      return next;
+    });
+  }
 
-  // Custom tooltip — shows source name, absolute count, and the %-of-visible.
-  // We pass which side we're on so the label ("Leads"/"Customers") matches.
-  const renderTooltip = (sideTotal: number, metric: string) =>
+  // Custom tooltip — shows row name, value for that metric, and %-of-visible.
+  const makeTooltip = (metric: MetricDef) =>
     ({ active, payload }: { active?: boolean; payload?: Array<{ name: string; value: number }> }) => {
       if (!active || !payload || payload.length === 0) return null;
       const item = payload[0];
-      const pct = sideTotal > 0 ? (item.value / sideTotal) * 100 : 0;
+      const total = totals[metric.key] || 0;
+      const pct = total > 0 ? (item.value / total) * 100 : 0;
       return (
         <div className="bg-white border border-surface-200 rounded-lg shadow-sm px-3 py-2 text-xs">
           <div className="font-medium text-brand-navy mb-0.5 max-w-[240px] truncate" title={item.name}>
             {item.name}
           </div>
           <div className="text-surface-600">
-            {metric}: <span className="font-semibold tabular-nums">{fmtInt(item.value)}</span>
+            {metric.label}: <span className="font-semibold tabular-nums">{metric.format(item.value)}</span>
             <span className="text-surface-400"> · {pct.toFixed(1)}%</span>
           </div>
         </div>
       );
     };
 
+  if (rows.length === 0) {
+    return (
+      <div className="text-[12px] text-surface-400 py-6 text-center">
+        Nothing to show — run attribution first.
+      </div>
+    );
+  }
+
   return (
-    <div className="card p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-semibold text-brand-navy">{title}</h3>
-        <div className="text-[10px] text-surface-400 uppercase tracking-wider">
-          {visible.length} of {rows.length} source{rows.length === 1 ? '' : 's'} visible
-        </div>
+    <div className="space-y-3">
+      {/* Metric checkboxes — control which donuts are visible. */}
+      <div className="flex flex-wrap items-center gap-3 text-[11px]">
+        <span className="text-surface-500 uppercase tracking-wider">Show:</span>
+        {metrics.map(m => {
+          const on = activeMetrics.has(m.key);
+          const color = METRIC_COLORS[m.key] ?? '#6B7280';
+          return (
+            <label
+              key={m.key}
+              className={`inline-flex items-center gap-1.5 cursor-pointer select-none ${on ? '' : 'opacity-50'}`}
+            >
+              <span
+                className="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 transition-colors"
+                style={{
+                  background: on ? color : 'transparent',
+                  borderColor: on ? color : '#CBD0D9',
+                }}
+              >
+                {on && <Check size={9} className="text-white" strokeWidth={3} />}
+              </span>
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => toggleMetric(m.key)}
+                className="sr-only"
+              />
+              <span className="text-surface-700">{m.label}</span>
+            </label>
+          );
+        })}
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
-        <DonutColumn
-          data={leadsData}
-          colorMap={colorMap}
-          hoverLabel={hoverLabel}
-          label={leftLabel}
-          total={leadsTotal}
-          tooltip={renderTooltip(leadsTotal, leftLabel)}
-        />
-        <DonutColumn
-          data={customersData}
-          colorMap={colorMap}
-          hoverLabel={hoverLabel}
-          label={rightLabel}
-          total={customersTotal}
-          tooltip={renderTooltip(customersTotal, rightLabel)}
-        />
+      {/* Donut grid — one column per active metric. Auto-balances width. */}
+      <div
+        className="grid gap-3"
+        style={{ gridTemplateColumns: `repeat(${Math.max(1, visibleMetrics.length)}, minmax(0, 1fr))` }}
+      >
+        {visibleMetrics.map(m => (
+          <DonutColumn
+            key={m.key}
+            data={visibleRows.map(r => ({ name: r.label, value: r.values[m.key] ?? 0 }))}
+            colorMap={colorMap}
+            hoverLabel={hoverLabel}
+            label={m.label}
+            total={totals[m.key]}
+            formatTotal={m.format}
+            tooltip={makeTooltip(m)}
+          />
+        ))}
       </div>
 
-      {/* Interactive legend — click toggles, hover highlights. Each row also
-          previews the source's lead share % and customer share %, so the
-          legend is also a comparison table. */}
-      <div className="mt-3 pt-3 border-t border-surface-100">
+      {/* Interactive legend — click toggles a row off/on; hover highlights it
+          across all donuts. Each legend item also shows its share for every
+          active metric, so the legend doubles as a comparison table. */}
+      <div className="pt-3 border-t border-surface-100">
         <div className="text-[10px] uppercase tracking-wider text-surface-500 mb-2">
-          Sources — click to toggle, hover to highlight
+          {sourceWord} — click to toggle, hover to highlight
         </div>
         <div className="space-y-1">
           {rows.map(r => {
             const off = disabled.has(r.label);
             const color = colorMap[r.label];
-            const leadsPct = leadsTotal > 0 && !off ? (r.total / leadsTotal) * 100 : 0;
-            const custPct = customersTotal > 0 && !off ? (r.leads / customersTotal) * 100 : 0;
             return (
               <button
                 key={r.label}
                 type="button"
-                onClick={() => toggle(r.label)}
+                onClick={() => toggleRow(r.label)}
                 onMouseEnter={() => setHoverLabel(r.label)}
                 onMouseLeave={() => setHoverLabel(null)}
                 className={`w-full flex items-center gap-2 px-2 py-1.5 rounded transition-colors text-left ${
                   off ? 'opacity-40 hover:opacity-60' : 'hover:bg-surface-50'
                 }`}
               >
-                {/* Checkbox swatch — colored when on, hollow when off */}
                 <span
                   className="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0"
                   style={{
@@ -3513,47 +3626,42 @@ function SourceShareChart({
                 >
                   {!off && <Check size={9} className="text-white" strokeWidth={3} />}
                 </span>
-                <span
-                  className="flex-1 text-xs text-surface-700 truncate"
-                  title={r.label}
-                >
+                <span className="flex-1 text-xs text-surface-700 truncate" title={r.label}>
                   {r.label}
                 </span>
-                <span className="text-[11px] text-surface-500 tabular-nums w-32 text-right">
-                  {off ? <span className="text-surface-300">hidden</span> : (
-                    <>
-                      <span title={`${leftLabel}: ${fmtInt(r.total)}`}>
-                        {leadsPct.toFixed(1)}%
+                {/* Per-metric share inline — shown only for active metrics. */}
+                <span className="flex items-center gap-3 text-[11px] tabular-nums">
+                  {visibleMetrics.map(m => {
+                    const v = r.values[m.key] ?? 0;
+                    const total = totals[m.key] || 0;
+                    const pct = !off && total > 0 ? (v / total) * 100 : 0;
+                    return (
+                      <span key={m.key} className="text-surface-500 w-14 text-right" title={`${m.label}: ${m.format(v)}`}>
+                        {off ? <span className="text-surface-300">—</span> : `${pct.toFixed(1)}%`}
                       </span>
-                      <span className="text-surface-300 mx-1">→</span>
-                      <span title={`${rightLabel}: ${fmtInt(r.leads)}`}>
-                        {custPct.toFixed(1)}%
-                      </span>
-                    </>
-                  )}
+                    );
+                  })}
                 </span>
               </button>
             );
           })}
         </div>
-        <p className="text-[10px] text-surface-400 mt-2 leading-relaxed">
-          Legend reads as <em>leads share → customers share</em>. Widening (e.g. 30% → 45%)
-          means the source over-performs its lead volume in converting customers.
-          Narrowing means under-performance.
-        </p>
       </div>
     </div>
   );
 }
 
 function DonutColumn({
-  data, colorMap, hoverLabel, label, total, tooltip,
+  data, colorMap, hoverLabel, label, total, formatTotal, tooltip,
 }: {
   data: Array<{ name: string; value: number }>;
   colorMap: Record<string, string>;
   hoverLabel: string | null;
   label: string;
   total: number;
+  // Custom formatter for the center "Total" number — fmtInt for counts,
+  // fmtINR for revenue donuts.
+  formatTotal: (n: number) => string;
   tooltip: React.ComponentType<{ active?: boolean; payload?: Array<{ name: string; value: number }> }>;
 }) {
   return (
@@ -3585,7 +3693,6 @@ function DonutColumn({
                   <Cell
                     key={d.name}
                     fill={colorMap[d.name] ?? '#CBD0D9'}
-                    // Dim non-hovered slices when one is hovered in the legend
                     fillOpacity={hoverLabel == null || hoverLabel === d.name ? 1 : 0.25}
                   />
                 ))}
@@ -3594,11 +3701,10 @@ function DonutColumn({
             </PieChart>
           </ResponsiveContainer>
         )}
-        {/* Center label — total count, centered inside the donut hole */}
         {total > 0 && (
           <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
             <div className="text-xs text-surface-500">Total</div>
-            <div className="text-lg font-semibold text-brand-navy tabular-nums">{fmtInt(total)}</div>
+            <div className="text-lg font-semibold text-brand-navy tabular-nums">{formatTotal(total)}</div>
           </div>
         )}
       </div>
@@ -3606,11 +3712,304 @@ function DonutColumn({
   );
 }
 
-// Duplicate phone detector. Scans every A row the algorithm saw — across all
-// attributed, pre-existing, AND unmatched buckets — for phones that appear
-// more than once. Surfaced as a warning because the algorithm uses the FIRST
-// occurrence; later duplicates are silently ignored. Common cause: the same
-// lead exists in both the dashboard fetch and an uploaded prospect list.
+// Time-series line chart over the date the A row was created. All three lines
+// share an x-axis (date) but revenue has a vastly different scale than counts,
+// so we put it on a right-side y-axis. Both axes auto-scale to the visible
+// data range, and toggling a metric off resets the axis it owns.
+type TrendDailyPoint = { date: string; leads: number; customers: number; revenue: number };
+function TrendChart({ data }: { data: TrendDailyPoint[] }) {
+  const [activeMetrics, setActiveMetrics] = useState<Set<string>>(
+    () => new Set(['leads', 'customers', 'revenue'])
+  );
+
+  function toggleMetric(key: string) {
+    setActiveMetrics(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      if (next.size === 0) return prev;
+      return next;
+    });
+  }
+
+  const showLeads = activeMetrics.has('leads');
+  const showCustomers = activeMetrics.has('customers');
+  const showRevenue = activeMetrics.has('revenue');
+  // Use a right-side Y axis for revenue only when revenue is the sole metric
+  // OR when revenue is shown alongside counts (so the two scales don't fight).
+  const needsRightAxis = showRevenue && (showLeads || showCustomers);
+
+  if (data.length === 0) {
+    return (
+      <div className="text-[12px] text-surface-400 py-6 text-center">
+        Nothing to show — run attribution first.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-3 text-[11px]">
+        <span className="text-surface-500 uppercase tracking-wider">Show:</span>
+        {(['leads', 'customers', 'revenue'] as const).map(key => {
+          const on = activeMetrics.has(key);
+          const color = METRIC_COLORS[key];
+          return (
+            <label
+              key={key}
+              className={`inline-flex items-center gap-1.5 cursor-pointer select-none ${on ? '' : 'opacity-50'}`}
+            >
+              <span
+                className="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 transition-colors"
+                style={{
+                  background: on ? color : 'transparent',
+                  borderColor: on ? color : '#CBD0D9',
+                }}
+              >
+                {on && <Check size={9} className="text-white" strokeWidth={3} />}
+              </span>
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => toggleMetric(key)}
+                className="sr-only"
+              />
+              <span className="text-surface-700">{METRIC_LABELS[key]}</span>
+            </label>
+          );
+        })}
+      </div>
+
+      <div className="h-72 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 10, right: needsRightAxis ? 20 : 10, left: -10, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#E5E8EE" />
+            <XAxis
+              dataKey="date"
+              tick={{ fontSize: 11, fill: '#6B7280' }}
+              tickFormatter={(d: string) => {
+                // ISO date → DD MMM. Compact for axis readability.
+                if (!d) return '';
+                const dt = new Date(d);
+                if (isNaN(dt.getTime())) return d;
+                return `${dt.getDate()} ${dt.toLocaleString('en-IN', { month: 'short' })}`;
+              }}
+            />
+            <YAxis
+              yAxisId="count"
+              tick={{ fontSize: 11, fill: '#6B7280' }}
+              allowDecimals={false}
+            />
+            {needsRightAxis && (
+              <YAxis
+                yAxisId="revenue"
+                orientation="right"
+                tick={{ fontSize: 11, fill: '#10B981' }}
+                tickFormatter={(v: number) => v >= 100000 ? `₹${(v/100000).toFixed(1)}L` : v >= 1000 ? `₹${(v/1000).toFixed(0)}K` : `₹${v}`}
+              />
+            )}
+            <RTooltip
+              contentStyle={{ borderRadius: 8, border: '1px solid #E5E8EE', fontSize: 12 }}
+              labelFormatter={(d: string) => {
+                if (!d) return '';
+                const dt = new Date(d);
+                if (isNaN(dt.getTime())) return d;
+                return dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+              }}
+              formatter={(value: number, name: string) => {
+                if (name === 'Revenue') return [fmtINR(value), name];
+                return [fmtInt(value), name];
+              }}
+            />
+            <Legend wrapperStyle={{ fontSize: 11 }} />
+            {showLeads && (
+              <Line
+                yAxisId="count"
+                type="monotone"
+                dataKey="leads"
+                name="Leads"
+                stroke={METRIC_COLORS.leads}
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                activeDot={{ r: 5 }}
+              />
+            )}
+            {showCustomers && (
+              <Line
+                yAxisId="count"
+                type="monotone"
+                dataKey="customers"
+                name="Customers"
+                stroke={METRIC_COLORS.customers}
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                activeDot={{ r: 5 }}
+              />
+            )}
+            {showRevenue && (
+              <Line
+                yAxisId={needsRightAxis ? "revenue" : "count"}
+                type="monotone"
+                dataKey="revenue"
+                name="Revenue"
+                stroke={METRIC_COLORS.revenue}
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                activeDot={{ r: 5 }}
+              />
+            )}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <p className="text-[10px] text-surface-400 leading-relaxed">
+        Counts on the left axis, revenue on the right (when both are shown).
+        Customers and revenue are <em>cohort</em>-attributed — they're plotted on
+        the date the lead was created, not the date the payment landed. This
+        lets you see "leads created on May 1 produced X customers and ₹Y revenue
+        eventually" at a glance.
+      </p>
+    </div>
+  );
+}
+
+// Top-level visualizations container — renders after Duplicates / preview as
+// an opt-in section. All three cards are default-closed; they share computed
+// data (source rows, product rows, daily trend) via memos so toggling one open
+// doesn't recompute the others.
+function Visualizations({
+  results, aSourceTotals, bExtras,
+}: {
+  results: Results;
+  aSourceTotals: Record<string, number>;
+  bExtras: ExtraMapping[];
+}) {
+  // Source-level pivot. Lead count comes from the per-source filtered totals
+  // (which include unmatched + pre-existing + attributed); customers/revenue
+  // come from attributed pairs only.
+  const sourceRows: DonutRow[] = useMemo(() => {
+    const agg = new Map<string, { leads: number; customers: number; revenue: number }>();
+    for (const [label, total] of Object.entries(aSourceTotals)) {
+      agg.set(label, { leads: total, customers: 0, revenue: 0 });
+    }
+    for (const p of results.attributedPairs) {
+      const cur = agg.get(p.aSourceLabel);
+      if (!cur) continue;
+      cur.customers += 1;
+      cur.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
+    }
+    return Array.from(agg.entries())
+      .map(([label, v]) => ({
+        label,
+        values: { leads: v.leads, customers: v.customers, revenue: v.revenue },
+      }))
+      .sort((a, b) => (b.values.leads ?? 0) - (a.values.leads ?? 0));
+  }, [results, aSourceTotals]);
+
+  // Product-level pivot. Customers (= attributed count) and revenue per product
+  // name. "Leads per product" is meaningless because raw leads have no product
+  // — products only attach to paying customers via the B side.
+  const hasProductMapping = bExtras.some(e => e.label === 'Product');
+  const productRows: DonutRow[] = useMemo(() => {
+    if (!hasProductMapping) return [];
+    const agg = new Map<string, { customers: number; revenue: number }>();
+    for (const p of results.attributedPairs) {
+      const productCol = p.bMapping.extras.find(e => e.label === 'Product')?.column;
+      if (!productCol) continue;
+      const product = (p.b[productCol] ?? '').trim() || '(no product)';
+      const cur = agg.get(product) ?? { customers: 0, revenue: 0 };
+      cur.customers += 1;
+      cur.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
+      agg.set(product, cur);
+    }
+    return Array.from(agg.entries())
+      .map(([label, v]) => ({
+        label,
+        values: { customers: v.customers, revenue: v.revenue },
+      }))
+      .sort((a, b) => (b.values.revenue ?? 0) - (a.values.revenue ?? 0));
+  }, [results, hasProductMapping]);
+
+  // Daily trend — leads from ALL A rows (attributed + preexisting + unmatched)
+  // by the A-side date; customers + revenue from attributedPairs by their
+  // a date (cohort view). Sources without a usable date column contribute 0.
+  const trendData: TrendDailyPoint[] = useMemo(() => {
+    const buckets = new Map<string, { leads: number; customers: number; revenue: number }>();
+    const ensure = (d: string) => {
+      if (!buckets.has(d)) buckets.set(d, { leads: 0, customers: 0, revenue: 0 });
+      return buckets.get(d)!;
+    };
+
+    const countLead = (row: Record<string, string>, mapping: ColumnMappingA) => {
+      const d = parseDate(row[mapping.date] ?? '');
+      if (d) ensure(d).leads += 1;
+    };
+    // All A rows = attributed + preexisting + unmatched. We avoid double-
+    // counting because each row appears in exactly one of these buckets.
+    for (const p of results.attributedPairs)   countLead(p.a, p.aMapping);
+    for (const p of results.preExistingPairs)  countLead(p.a, p.aMapping);
+    for (const u of results.unmatchedSources)  countLead(u.row, u.mapping);
+
+    // Customers + revenue from attributed pairs (cohort view via A date).
+    for (const p of results.attributedPairs) {
+      if (!p.aDateIso) continue;
+      const e = ensure(p.aDateIso);
+      e.customers += 1;
+      e.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
+    }
+
+    return Array.from(buckets.entries())
+      .map(([date, v]) => ({ date, ...v }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }, [results]);
+
+  const sourceMetrics: MetricDef[] = [
+    { key: 'leads',     label: 'Leads',     format: fmtInt },
+    { key: 'customers', label: 'Customers', format: fmtInt },
+    { key: 'revenue',   label: 'Revenue',   format: fmtINR },
+  ];
+  const productMetrics: MetricDef[] = [
+    { key: 'customers', label: 'Customers', format: fmtInt },
+    { key: 'revenue',   label: 'Revenue',   format: fmtINR },
+  ];
+
+  return (
+    <div className="space-y-3 mt-4">
+      <div className="text-[11px] uppercase tracking-wider text-surface-500 px-1">
+        Visualizations
+      </div>
+      <CollapsibleCard
+        title="Share by source"
+        subtitle="Donuts showing % share of leads, customers, and revenue by File A source. Click any source in the legend to exclude it."
+      >
+        <MultiDonutChart rows={sourceRows} metrics={sourceMetrics} sourceWord="Sources" />
+      </CollapsibleCard>
+      <CollapsibleCard
+        title="Share by product"
+        subtitle={hasProductMapping
+          ? 'Customers and revenue split by product (read from each B file\'s Product column).'
+          : 'Add a "Product" mapping on any File B card to enable this view.'}
+      >
+        {hasProductMapping ? (
+          <MultiDonutChart rows={productRows} metrics={productMetrics} sourceWord="Products" />
+        ) : (
+          <div className="text-[12px] text-surface-400 py-6 text-center">
+            No product mapping detected on any File B source.
+          </div>
+        )}
+      </CollapsibleCard>
+      <CollapsibleCard
+        title="Trend over time"
+        subtitle="Daily counts of leads created (File A), customers attributed, and revenue — plotted by the lead-creation date (cohort view)."
+      >
+        <TrendChart data={trendData} />
+      </CollapsibleCard>
+    </div>
+  );
+}
+
+
+
 function DuplicatesCard({
   pairs,
   unmatchedSources,
