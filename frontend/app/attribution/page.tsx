@@ -109,6 +109,11 @@ type Results = {
   // unmatched row so the duplicate detector can read the right phone column
   // and attribute the duplicate to the right A source.
   unmatchedSources: Array<{ row: Record<string, string>; mapping: ColumnMappingA; label: string }>;
+  // Per-source filtered-row counts. Keys are source labels (matching
+  // MatchedPair.aSourceLabel / bSourceLabel). Used by SourcePivot to compute
+  // CVR (customers / leads) per A source and attribution rate per B source.
+  aSourceTotals: Record<string, number>;
+  bSourceTotals: Record<string, number>;
   ranAt: number;
 };
 
@@ -660,12 +665,16 @@ function runAttribution(input: RunInput): Results {
   };
 
   const bIndex = new Map<string, IndexedB[]>();
-  let totalBRowsKept = 0;
+  // Per-source filtered count. Keyed by source label, written as we walk
+  // each B source so callers can show "of X transactions, Y were attributed"
+  // per source row.
+  const bSourceTotals: Record<string, number> = {};
   for (const src of sourcesB) {
     const { rows, mapping, label } = src;
+    if (!(label in bSourceTotals)) bSourceTotals[label] = 0;
     for (const row of rows) {
       if (!passesB(row)) continue;
-      totalBRowsKept++;
+      bSourceTotals[label]++;
       const phone = normalizePhone(row[mapping.phone] ?? '');
       if (!phone) continue;
       const entry: IndexedB = {
@@ -698,11 +707,18 @@ function runAttribution(input: RunInput): Results {
     unmatchedSources.push({ row, mapping, label });
   };
 
+  // Per-source filtered count for A. We increment for every A row that
+  // passes filters (regardless of whether it later matches a B row). This is
+  // the "total leads from this source we considered" denominator for CVR.
+  const aSourceTotals: Record<string, number> = {};
+
   for (const src of sourcesA) {
     const { rows, mapping, label: aLabel } = src;
+    if (!(aLabel in aSourceTotals)) aSourceTotals[aLabel] = 0;
     for (const aRow of rows) {
       if (!passesA(aRow)) continue;
       totalARowsKept++;
+      aSourceTotals[aLabel]++;
       const aPhone = normalizePhone(aRow[mapping.phone] ?? '');
       const aDateIso = parseDate(aRow[mapping.date] ?? '');
 
@@ -753,7 +769,6 @@ function runAttribution(input: RunInput): Results {
     }
   }
 
-  void totalBRowsKept; // reserved for future per-source counters
   return {
     totalA: totalARowsKept,
     keyMatched: attributedPairs.length + preExistingPairs.length,
@@ -762,6 +777,7 @@ function runAttribution(input: RunInput): Results {
     unmatched: unmatchedRows.length,
     revenueTotal, revenuePaid,
     attributedPairs, preExistingPairs, unmatchedRows, unmatchedSources,
+    aSourceTotals, bSourceTotals,
     ranAt: Date.now(),
   };
 }
@@ -2560,6 +2576,8 @@ function ResultsBlock({
         pairs={results.attributedPairs}
         aSourceCount={aSourceCount}
         bSourceCount={bSourceCount}
+        aSourceTotals={results.aSourceTotals}
+        bSourceTotals={results.bSourceTotals}
       />
 
       {/* Duplicate phones — warn the user if their A sources share leads.
@@ -2826,47 +2844,93 @@ function ProductPivot({
 // payment file accounted for what revenue). Renders only when 2+ sources
 // exist on either side — single-source runs hide the pivot since there's
 // nothing to compare.
-function SourcePivot({ pairs, aSourceCount, bSourceCount }: { pairs: MatchedPair[]; aSourceCount: number; bSourceCount: number }) {
-  type Row = { label: string; leads: number; revenue: number; paid: number };
+function SourcePivot({ pairs, aSourceCount, bSourceCount, aSourceTotals, bSourceTotals }: {
+  pairs: MatchedPair[];
+  aSourceCount: number;
+  bSourceCount: number;
+  // Source label → count of filtered rows BEFORE attribution matching.
+  // Used as the denominator for CVR ("how many of the leads we considered
+  // ended up paying"). For A-side, this is "leads we tried to attribute".
+  // For B-side, it's "transactions we tried to attribute back to a lead".
+  aSourceTotals: Record<string, number>;
+  bSourceTotals: Record<string, number>;
+}) {
+  type Row = { label: string; total: number; leads: number; revenue: number; paid: number };
 
   const byA: Row[] = useMemo(() => {
     if (aSourceCount < 2) return [];
     const agg = new Map<string, Row>();
     for (const p of pairs) {
-      const cur = agg.get(p.aSourceLabel) ?? { label: p.aSourceLabel, leads: 0, revenue: 0, paid: 0 };
+      const cur = agg.get(p.aSourceLabel) ?? {
+        label: p.aSourceLabel,
+        total: aSourceTotals[p.aSourceLabel] ?? 0,
+        leads: 0, revenue: 0, paid: 0,
+      };
       cur.leads += 1;
       cur.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
       cur.paid += p.bMapping.amountPaid ? (parseFloat(p.b[p.bMapping.amountPaid]) || 0) : 0;
       agg.set(p.aSourceLabel, cur);
     }
+    // Also include sources that had leads but zero conversions — without
+    // this they'd be invisible despite contributing to total leads. CVR for
+    // these rows will read 0%, which is the correct answer.
+    for (const [label, total] of Object.entries(aSourceTotals)) {
+      if (!agg.has(label)) {
+        agg.set(label, { label, total, leads: 0, revenue: 0, paid: 0 });
+      }
+    }
     return Array.from(agg.values()).sort((x, y) => y.leads - x.leads);
-  }, [pairs, aSourceCount]);
+  }, [pairs, aSourceCount, aSourceTotals]);
 
   const byB: Row[] = useMemo(() => {
     if (bSourceCount < 2) return [];
     const agg = new Map<string, Row>();
     for (const p of pairs) {
-      const cur = agg.get(p.bSourceLabel) ?? { label: p.bSourceLabel, leads: 0, revenue: 0, paid: 0 };
+      const cur = agg.get(p.bSourceLabel) ?? {
+        label: p.bSourceLabel,
+        total: bSourceTotals[p.bSourceLabel] ?? 0,
+        leads: 0, revenue: 0, paid: 0,
+      };
       cur.leads += 1;
       cur.revenue += p.bMapping.amount ? (parseFloat(p.b[p.bMapping.amount]) || 0) : 0;
       cur.paid += p.bMapping.amountPaid ? (parseFloat(p.b[p.bMapping.amountPaid]) || 0) : 0;
       agg.set(p.bSourceLabel, cur);
     }
     return Array.from(agg.values()).sort((x, y) => y.leads - x.leads);
-  }, [pairs, bSourceCount]);
+  }, [pairs, bSourceCount, bSourceTotals]);
 
   if (byA.length === 0 && byB.length === 0) return null;
 
   const totals = (rows: Row[]) => ({
+    total: rows.reduce((s, r) => s + r.total, 0),
     leads: rows.reduce((s, r) => s + r.leads, 0),
     revenue: rows.reduce((s, r) => s + r.revenue, 0),
     paid: rows.reduce((s, r) => s + r.paid, 0),
   });
 
-  const SourceTable = ({ title, rows }: { title: string; rows: Row[] }) => {
+  const SourceTable = ({ title, rows, kind }: { title: string; rows: Row[]; kind: 'A' | 'B' }) => {
     const t = totals(rows);
     const hasRevenue = rows.some(r => r.revenue > 0);
     const hasPaid = rows.some(r => r.paid > 0);
+    // For A: "Leads" = total leads in that A source (filtered);
+    //         "Customers" = leads matched to a payment (CVR numerator).
+    // For B: "Txns" = total transactions in that B source (filtered);
+    //         "Attributed" = txns matched to an A lead (rate numerator).
+    // Conversion column shows numerator/denominator as a percentage; if the
+    // denominator is 0 we render "—" to avoid 0/0 confusion.
+    const headerLeads = kind === 'A' ? 'Leads' : 'Txns';
+    const headerCustomers = kind === 'A' ? 'Customers' : 'Attributed';
+    const headerRate = kind === 'A' ? 'CVR' : 'Rate';
+    const tooltipLeads = kind === 'A'
+      ? 'Total leads from this source that passed bucket/filter rules.'
+      : 'Total transactions from this source that passed status/filter rules.';
+    const tooltipCustomers = kind === 'A'
+      ? 'Leads from this source attributed to a payment (B-after-A).'
+      : 'Transactions attributed back to an upstream lead.';
+    const tooltipRate = kind === 'A'
+      ? 'Customers ÷ Leads. The conversion rate for this lead source.'
+      : 'Attributed ÷ Txns. The fraction of this payment file we could trace back.';
+
     return (
       <div className="card overflow-hidden">
         <div className="px-3 py-2 border-b border-surface-100 flex items-center justify-between">
@@ -2878,7 +2942,9 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount }: { pairs: MatchedPair
             <thead className="bg-surface-50 text-[10px] uppercase tracking-wider text-surface-500">
               <tr>
                 <th className="text-left py-2 px-3 whitespace-nowrap">Source</th>
-                <th className="text-right py-2 px-3 whitespace-nowrap">Leads</th>
+                <th className="text-right py-2 px-3 whitespace-nowrap" title={tooltipLeads}>{headerLeads}</th>
+                <th className="text-right py-2 px-3 whitespace-nowrap" title={tooltipCustomers}>{headerCustomers}</th>
+                <th className="text-right py-2 px-3 whitespace-nowrap" title={tooltipRate}>{headerRate}</th>
                 {hasRevenue && <th className="text-right py-2 px-3 whitespace-nowrap">Revenue</th>}
                 {hasPaid && <th className="text-right py-2 px-3 whitespace-nowrap">Paid</th>}
                 <th className="text-right py-2 px-3 whitespace-nowrap">Share</th>
@@ -2888,7 +2954,11 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount }: { pairs: MatchedPair
               {rows.map(r => (
                 <tr key={r.label} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
                   <td className="py-2 px-3 text-surface-700 max-w-[260px] truncate" title={r.label}>{r.label}</td>
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(r.total)}</td>
                   <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(r.leads)}</td>
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700">
+                    {r.total > 0 ? `${((r.leads / r.total) * 100).toFixed(1)}%` : <span className="text-surface-300">—</span>}
+                  </td>
                   {hasRevenue && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(r.revenue)}</td>}
                   {hasPaid && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(r.paid)}</td>}
                   <td className="py-2 px-3 text-right tabular-nums text-surface-500">{fmtPct(r.leads, t.leads)}</td>
@@ -2896,7 +2966,11 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount }: { pairs: MatchedPair
               ))}
               <tr className="bg-surface-50 font-medium">
                 <td className="py-2 px-3 text-surface-700">Total</td>
+                <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(t.total)}</td>
                 <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtInt(t.leads)}</td>
+                <td className="py-2 px-3 text-right tabular-nums text-surface-700">
+                  {t.total > 0 ? `${((t.leads / t.total) * 100).toFixed(1)}%` : <span className="text-surface-300">—</span>}
+                </td>
                 {hasRevenue && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(t.revenue)}</td>}
                 {hasPaid && <td className="py-2 px-3 text-right tabular-nums text-surface-700">{fmtINR(t.paid)}</td>}
                 <td className="py-2 px-3 text-right tabular-nums text-surface-500">100%</td>
@@ -2910,8 +2984,8 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount }: { pairs: MatchedPair
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-      {byA.length > 0 && <SourceTable title="By File A source (where leads came from)" rows={byA} />}
-      {byB.length > 0 && <SourceTable title="By File B source (where revenue landed)" rows={byB} />}
+      {byA.length > 0 && <SourceTable title="By File A source (where leads came from)" rows={byA} kind="A" />}
+      {byB.length > 0 && <SourceTable title="By File B source (where revenue landed)" rows={byB} kind="B" />}
     </div>
   );
 }
