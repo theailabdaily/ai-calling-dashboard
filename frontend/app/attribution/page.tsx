@@ -4,7 +4,9 @@ import { useQuery } from '@tanstack/react-query';
 import {
   Upload, X, Plus, Download, Play, ChevronRight, ChevronDown,
   RotateCcw, Shuffle, FileSpreadsheet, AlertCircle, Database, Loader2,
+  Check,
 } from 'lucide-react';
+import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RTooltip } from 'recharts';
 import { api } from '@/lib/api';
 import type { Agent, Campaign, Filters, Vendor } from '@/types';
 import { useRequireProductLine } from '@/lib/use-product-line';
@@ -2983,9 +2985,267 @@ function SourcePivot({ pairs, aSourceCount, bSourceCount, aSourceTotals, bSource
   };
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-      {byA.length > 0 && <SourceTable title="By File A source (where leads came from)" rows={byA} kind="A" />}
-      {byB.length > 0 && <SourceTable title="By File B source (where revenue landed)" rows={byB} kind="B" />}
+    <div className="space-y-3 mt-3">
+      {/* Visual share — twin donut charts comparing each source's contribution
+          to total leads (left donut) vs total customers (right donut). Sources
+          with a wider customer slice than leads slice over-perform their share;
+          narrower customer slice = under-performer. Legend is interactive —
+          click any source to toggle it out of both donuts; percentages
+          recompute over the remaining sources. */}
+      {byA.length > 0 && (
+        <SourceShareChart
+          rows={byA}
+          title="Lead share vs customer share (File A)"
+          leftLabel="Leads"
+          rightLabel="Customers"
+        />
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {byA.length > 0 && <SourceTable title="By File A source (where leads came from)" rows={byA} kind="A" />}
+        {byB.length > 0 && <SourceTable title="By File B source (where revenue landed)" rows={byB} kind="B" />}
+      </div>
+    </div>
+  );
+}
+
+// Twin donut chart for comparing each source's % share of total leads vs
+// total customers. Color palette is deterministic by source order so toggling
+// doesn't reshuffle colors. The legend doubles as a filter — click to hide a
+// source, percentages recompute. Hovering a legend row highlights the matching
+// slice in both donuts simultaneously, so you can read "ah, this source has 60%
+// of leads but only 25% of customers — that's the low-CVR one" at a glance.
+//
+// Performance: this is a render-only client component over a small array
+// (typically 2–10 sources). No memoization beyond React's defaults needed.
+const SOURCE_COLORS = [
+  '#E8345C', // brand pink — first source, usually the dominant one
+  '#1B1A36', // brand navy
+  '#10B981', // green
+  '#F59E0B', // amber
+  '#3B82F6', // blue
+  '#8B5CF6', // purple
+  '#06B6D4', // cyan
+  '#F472B6', // light pink
+  '#84CC16', // lime
+  '#EF4444', // red — last resort, used only if 10+ sources
+];
+
+function SourceShareChart({
+  rows, title, leftLabel, rightLabel,
+}: {
+  rows: { label: string; total: number; leads: number }[];
+  title: string;
+  leftLabel: string;
+  rightLabel: string;
+}) {
+  // Disabled sources are filtered out of the donuts. Set lives in component
+  // state so toggling rerenders instantly without touching parent state.
+  const [disabled, setDisabled] = useState<Set<string>>(new Set());
+  const [hoverLabel, setHoverLabel] = useState<string | null>(null);
+
+  // Stable color assignment — index in the input `rows` array drives the
+  // color, so toggling sources in/out never reshuffles. If we eventually
+  // sort rows in the parent, that ordering controls the palette.
+  const colorMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    rows.forEach((r, i) => { m[r.label] = SOURCE_COLORS[i % SOURCE_COLORS.length]; });
+    return m;
+  }, [rows]);
+
+  const visible = rows.filter(r => !disabled.has(r.label));
+
+  // Recharts wants Array<{name, value}>. We compute two parallel datasets so
+  // each donut animates independently — and so the slice colors line up across
+  // donuts by source name (not by sort order, which differs).
+  const leadsData = visible.map(r => ({ name: r.label, value: r.total }));
+  const customersData = visible.map(r => ({ name: r.label, value: r.leads }));
+  const leadsTotal = leadsData.reduce((s, d) => s + d.value, 0);
+  const customersTotal = customersData.reduce((s, d) => s + d.value, 0);
+
+  function toggle(label: string) {
+    setDisabled(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      // Guard against disabling every source — the chart would be empty,
+      // which is technically valid but visually confusing. Refuse the last
+      // toggle if it would empty the chart.
+      if (next.size === rows.length) return prev;
+      return next;
+    });
+  }
+
+  // Custom tooltip — shows source name, absolute count, and the %-of-visible.
+  // We pass which side we're on so the label ("Leads"/"Customers") matches.
+  const renderTooltip = (sideTotal: number, metric: string) =>
+    ({ active, payload }: { active?: boolean; payload?: Array<{ name: string; value: number }> }) => {
+      if (!active || !payload || payload.length === 0) return null;
+      const item = payload[0];
+      const pct = sideTotal > 0 ? (item.value / sideTotal) * 100 : 0;
+      return (
+        <div className="bg-white border border-surface-200 rounded-lg shadow-sm px-3 py-2 text-xs">
+          <div className="font-medium text-brand-navy mb-0.5 max-w-[240px] truncate" title={item.name}>
+            {item.name}
+          </div>
+          <div className="text-surface-600">
+            {metric}: <span className="font-semibold tabular-nums">{fmtInt(item.value)}</span>
+            <span className="text-surface-400"> · {pct.toFixed(1)}%</span>
+          </div>
+        </div>
+      );
+    };
+
+  return (
+    <div className="card p-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-brand-navy">{title}</h3>
+        <div className="text-[10px] text-surface-400 uppercase tracking-wider">
+          {visible.length} of {rows.length} source{rows.length === 1 ? '' : 's'} visible
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <DonutColumn
+          data={leadsData}
+          colorMap={colorMap}
+          hoverLabel={hoverLabel}
+          label={leftLabel}
+          total={leadsTotal}
+          tooltip={renderTooltip(leadsTotal, leftLabel)}
+        />
+        <DonutColumn
+          data={customersData}
+          colorMap={colorMap}
+          hoverLabel={hoverLabel}
+          label={rightLabel}
+          total={customersTotal}
+          tooltip={renderTooltip(customersTotal, rightLabel)}
+        />
+      </div>
+
+      {/* Interactive legend — click toggles, hover highlights. Each row also
+          previews the source's lead share % and customer share %, so the
+          legend is also a comparison table. */}
+      <div className="mt-3 pt-3 border-t border-surface-100">
+        <div className="text-[10px] uppercase tracking-wider text-surface-500 mb-2">
+          Sources — click to toggle, hover to highlight
+        </div>
+        <div className="space-y-1">
+          {rows.map(r => {
+            const off = disabled.has(r.label);
+            const color = colorMap[r.label];
+            const leadsPct = leadsTotal > 0 && !off ? (r.total / leadsTotal) * 100 : 0;
+            const custPct = customersTotal > 0 && !off ? (r.leads / customersTotal) * 100 : 0;
+            return (
+              <button
+                key={r.label}
+                type="button"
+                onClick={() => toggle(r.label)}
+                onMouseEnter={() => setHoverLabel(r.label)}
+                onMouseLeave={() => setHoverLabel(null)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 rounded transition-colors text-left ${
+                  off ? 'opacity-40 hover:opacity-60' : 'hover:bg-surface-50'
+                }`}
+              >
+                {/* Checkbox swatch — colored when on, hollow when off */}
+                <span
+                  className="w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0"
+                  style={{
+                    background: off ? 'transparent' : color,
+                    borderColor: off ? '#CBD0D9' : color,
+                  }}
+                >
+                  {!off && <Check size={9} className="text-white" strokeWidth={3} />}
+                </span>
+                <span
+                  className="flex-1 text-xs text-surface-700 truncate"
+                  title={r.label}
+                >
+                  {r.label}
+                </span>
+                <span className="text-[11px] text-surface-500 tabular-nums w-32 text-right">
+                  {off ? <span className="text-surface-300">hidden</span> : (
+                    <>
+                      <span title={`${leftLabel}: ${fmtInt(r.total)}`}>
+                        {leadsPct.toFixed(1)}%
+                      </span>
+                      <span className="text-surface-300 mx-1">→</span>
+                      <span title={`${rightLabel}: ${fmtInt(r.leads)}`}>
+                        {custPct.toFixed(1)}%
+                      </span>
+                    </>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-surface-400 mt-2 leading-relaxed">
+          Legend reads as <em>leads share → customers share</em>. Widening (e.g. 30% → 45%)
+          means the source over-performs its lead volume in converting customers.
+          Narrowing means under-performance.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function DonutColumn({
+  data, colorMap, hoverLabel, label, total, tooltip,
+}: {
+  data: Array<{ name: string; value: number }>;
+  colorMap: Record<string, string>;
+  hoverLabel: string | null;
+  label: string;
+  total: number;
+  tooltip: React.ComponentType<{ active?: boolean; payload?: Array<{ name: string; value: number }> }>;
+}) {
+  return (
+    <div className="flex flex-col items-center">
+      <div className="text-[10px] uppercase tracking-wider text-surface-500 mb-1">
+        {label}
+      </div>
+      <div className="h-44 w-full relative">
+        {data.length === 0 || total === 0 ? (
+          <div className="h-full flex items-center justify-center text-xs text-surface-400">
+            No data
+          </div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={data}
+                dataKey="value"
+                nameKey="name"
+                cx="50%"
+                cy="50%"
+                innerRadius={42}
+                outerRadius={72}
+                paddingAngle={1}
+                stroke="#FFFFFF"
+                strokeWidth={2}
+              >
+                {data.map(d => (
+                  <Cell
+                    key={d.name}
+                    fill={colorMap[d.name] ?? '#CBD0D9'}
+                    // Dim non-hovered slices when one is hovered in the legend
+                    fillOpacity={hoverLabel == null || hoverLabel === d.name ? 1 : 0.25}
+                  />
+                ))}
+              </Pie>
+              <RTooltip content={tooltip as any} />
+            </PieChart>
+          </ResponsiveContainer>
+        )}
+        {/* Center label — total count, centered inside the donut hole */}
+        {total > 0 && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            <div className="text-xs text-surface-500">Total</div>
+            <div className="text-lg font-semibold text-brand-navy tabular-nums">{fmtInt(total)}</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
