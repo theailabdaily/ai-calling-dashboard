@@ -58,17 +58,11 @@ type ColumnMappingA = {
   date: string;
   // Per-source bucket column. For the dashboard slot this is set to '_bucket'
   // (a synthetic column the dashboard fetch adds). For uploaded files the user
-  // picks the column that contains the lead category (e.g. 'category',
-  // 'lead_status', 'sales_team'). Used by the bucket pill filter AND by the
-  // attributed-leads preview to display the bucket per row.
+  // picks the column that contains the lead category (e.g. 'lead_temperature',
+  // 'sales_team', 'category'). Unique values from this column are auto-added
+  // to the bucket pill filter so newly-uploaded buckets are included by
+  // default — the user can deselect individual values via the pills.
   bucket?: string;
-  // Alternative to `bucket` for uploaded files that have NO category column.
-  // The user picks one fixed value (e.g. 'noida_sales', 'online_signup') and
-  // every row from that source is treated as if it had that bucket. Mutually
-  // exclusive with `bucket` — when bucketFixed is set, the algorithm and UI
-  // ignore the bucket column. Lets a sales team upload a flat list and still
-  // participate in bucket pill filtering.
-  bucketFixed?: string;
   // Display-only columns shown in the preview table between Bucket and A
   // date. Useful for surfacing Vendor / Campaign / Agent in dashboard mode
   // or any custom column from an uploaded CSV. Don't affect matching.
@@ -79,14 +73,11 @@ type ColumnMappingB = {
   date: string;
   amount?: string;
   amountPaid?: string;
-  // Per-source status column. Same idea as ColumnMappingA.bucket — lets each
-  // uploaded payment file have its own status column name (e.g. 'status',
-  // 'payment_status', 'state'). The status pill filter unions values across
-  // all B sources' mapped status columns.
+  // Per-source status column. OPTIONAL — leave empty if your file only
+  // contains valid (success/paid) rows. If mapped, unique column values are
+  // auto-added to the status pill filter and only matching rows enter the
+  // attribution match. Common columns: 'status', 'payment_status', 'state'.
   status?: string;
-  // Alternative to `status` for payment files with no status column. Same
-  // mutual-exclusion rule as ColumnMappingA.bucketFixed.
-  statusFixed?: string;
   // Display-only mappings. Shown as columns in the preview tables and
   // appended to download CSVs. Don't affect the matching algorithm.
   // Each entry has a user-editable label + the source column from File B.
@@ -666,36 +657,21 @@ function runAttribution(input: RunInput): Results {
     rule, countSameDay,
   } = input;
 
-  // Per-source filter pass. Each source's mapping declares HOW to derive its
-  // bucket / status: either by reading a column (mapping.bucket) or by using
-  // a fixed value applied to every row (mapping.bucketFixed). Fixed value
-  // wins when both are set. If neither is set, the source has no category and
-  // the pill filter skips it (rows pass through). This lets a flat upload
-  // like "noida_sales.csv" still participate in bucket filtering by tagging
-  // the whole file with one bucket up-front.
-  const effectiveBucketA = (row: Record<string, string>, mapping: ColumnMappingA): string => {
-    if (mapping.bucketFixed) return mapping.bucketFixed;
-    if (mapping.bucket) return (row[mapping.bucket] ?? '').trim();
-    return '';
-  };
-  const effectiveStatusB = (row: Record<string, string>, mapping: ColumnMappingB): string => {
-    if (mapping.statusFixed) return mapping.statusFixed;
-    if (mapping.status) return (row[mapping.status] ?? '').trim();
-    return '';
-  };
+  // Per-source filter pass. Each source declares its own bucket / status
+  // column. Empty value (or no column mapped) = the row has no category, so
+  // the pill filter doesn't exclude it (only custom-filter rules apply).
+  // Unique values from the column are auto-added to the pill selection when
+  // the upload is mapped — see the useEffect that watches uploadsA above.
   const passesA = (row: Record<string, string>, mapping: ColumnMappingA): boolean => {
-    if (bucketSelA.size > 0) {
-      const v = effectiveBucketA(row, mapping);
-      // Empty bucket = no category info on this row; let it through (matches
-      // legacy "uploaded files pass the bucket filter" behavior). If user
-      // wants strict filtering, they should set bucketFixed on the source.
+    if (mapping.bucket && bucketSelA.size > 0) {
+      const v = (row[mapping.bucket] ?? '').trim();
       if (v && !bucketSelA.has(v)) return false;
     }
     return passesAllFilters(row, filtersA);
   };
   const passesB = (row: Record<string, string>, mapping: ColumnMappingB): boolean => {
-    if (statusSelB.size > 0) {
-      const v = effectiveStatusB(row, mapping);
+    if (mapping.status && statusSelB.size > 0) {
+      const v = (row[mapping.status] ?? '').trim();
       if (v && !statusSelB.has(v)) return false;
     }
     return passesAllFilters(row, filtersB);
@@ -964,15 +940,7 @@ export default function LeadAttributionPage() {
       }
     };
     if (dashboardData && mappingDashboardA) collect(dashboardData.rows, mappingDashboardA.bucket);
-    uploadsA.forEach((u, i) => {
-      const m = mappingsUploadsA[i];
-      if (!m) return;
-      // Source declared a fixed bucket — surface it as a pill option so the
-      // user can include / exclude it in the filter even if no row in any
-      // source carries the value as a column.
-      if (m.bucketFixed) set.add(m.bucketFixed);
-      else collect(u.rows, m.bucket);
-    });
+    uploadsA.forEach((u, i) => collect(u.rows, mappingsUploadsA[i]?.bucket));
     const values = Array.from(set);
     values.sort((a, b) => {
       const oa = BUCKET_ORDER[a];
@@ -989,10 +957,7 @@ export default function LeadAttributionPage() {
   const statusValuesB = useMemo(() => {
     const set = new Set<string>();
     uploadsB.forEach((u, i) => {
-      const m = mappingsB[i];
-      if (!m) return;
-      if (m.statusFixed) { set.add(m.statusFixed); return; }
-      const col = m.status;
+      const col = mappingsB[i]?.status;
       if (!col) return;
       for (const r of u.rows) {
         const v = (r[col] ?? '').trim();
@@ -1004,36 +969,70 @@ export default function LeadAttributionPage() {
   }, [uploadsB, mappingsB]);
   const [statusSelB, setStatusSelB] = useState<Set<string>>(new Set());
 
-  // When the user sets bucketFixed on an uploaded A source (or statusFixed on
-  // a B source), auto-include that value in the filter selection. Without
-  // this, the user picks "noida_sales" as the fixed value, the row carries
-  // 'noida_sales', and passesA filters it out because bucketSelA only had
-  // the default three dashboard buckets. Surprising disappearance. We only
-  // ADD — we never remove from the selection here, so the user retains the
-  // ability to manually deselect via the pills if they want to.
+  // Auto-include unique bucket values from uploaded A sources into bucketSelA.
+  //
+  // The pain point this fixes: user uploads a CSV with a `lead_temperature`
+  // column (values: hot/warm/cold), maps it to Bucket, runs attribution → zero
+  // rows pass because bucketSelA only contained the dashboard defaults
+  // (top_priority, interested_only, callback_only). The uploaded values weren't
+  // selected so passesA filtered every row.
+  //
+  // Fix: when an upload's bucket column is mapped, scan its values and add any
+  // NEW ones to bucketSelA. A ref tracks "ever-seen" values so we only add
+  // each value once — if the user later deselects a value via the pills, we
+  // don't undo their choice on the next render.
+  const seenUploadBucketValuesA = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const fixed = mappingsUploadsA.map(m => m?.bucketFixed).filter((v): v is string => !!v);
-    if (fixed.length === 0) return;
+    const fresh: string[] = [];
+    for (let i = 0; i < uploadsA.length; i++) {
+      const u = uploadsA[i];
+      const m = mappingsUploadsA[i];
+      if (!m || !m.bucket) continue;
+      for (const row of u.rows) {
+        const v = (row[m.bucket] ?? '').trim();
+        if (!v) continue;
+        if (seenUploadBucketValuesA.current.has(v)) continue;
+        seenUploadBucketValuesA.current.add(v);
+        fresh.push(v);
+        // Cap to avoid stalling on huge files with many distinct values
+        if (fresh.length >= 100) break;
+      }
+      if (fresh.length >= 100) break;
+    }
+    if (fresh.length === 0) return;
     setBucketSelA(prev => {
-      let changed = false;
       const next = new Set(prev);
-      for (const v of fixed) if (!next.has(v)) { next.add(v); changed = true; }
-      // Only update if at least one ADD happened — otherwise we'd cause
-      // re-renders without state change and risk an infinite loop.
-      return changed ? next : prev;
+      for (const v of fresh) next.add(v);
+      return next;
     });
-  }, [mappingsUploadsA]);
+  }, [uploadsA, mappingsUploadsA]);
 
+  // Same auto-include logic for File B status values from uploaded payment
+  // files. Skipped when no status column is mapped (status is optional now).
+  const seenUploadStatusValuesB = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const fixed = mappingsB.map(m => m?.statusFixed).filter((v): v is string => !!v);
-    if (fixed.length === 0) return;
+    const fresh: string[] = [];
+    for (let i = 0; i < uploadsB.length; i++) {
+      const u = uploadsB[i];
+      const m = mappingsB[i];
+      if (!m || !m.status) continue;
+      for (const row of u.rows) {
+        const v = (row[m.status] ?? '').trim();
+        if (!v) continue;
+        if (seenUploadStatusValuesB.current.has(v)) continue;
+        seenUploadStatusValuesB.current.add(v);
+        fresh.push(v);
+        if (fresh.length >= 100) break;
+      }
+      if (fresh.length >= 100) break;
+    }
+    if (fresh.length === 0) return;
     setStatusSelB(prev => {
-      let changed = false;
       const next = new Set(prev);
-      for (const v of fixed) if (!next.has(v)) { next.add(v); changed = true; }
-      return changed ? next : prev;
+      for (const v of fresh) next.add(v);
+      return next;
     });
-  }, [mappingsB]);
+  }, [uploadsB, mappingsB]);
 
   // Custom filters
   const [filtersA, setFiltersA] = useState<FilterRule[]>([]);
@@ -1284,18 +1283,16 @@ export default function LeadAttributionPage() {
   };
 
   // ---- Live row counts after filtering ----
-  // Walk per-source. Each source applies its OWN bucket/status (column OR
-  // fixed value). Sources with neither set pass through the pill filter
-  // without category-based exclusion (only custom-filter rules apply).
+  // Walk per-source. Each source applies its OWN bucket / status column.
+  // Sources that haven't mapped a category column pass through the pill
+  // filter without category-based exclusion (only custom-filter rules apply).
   const filteredACount = useMemo(() => {
     let n = 0;
     const countSource = (rows: Record<string, string>[], mapping: ColumnMappingA | null) => {
       if (!mapping) return;
       for (const row of rows) {
-        if (bucketSelA.size > 0) {
-          const v = mapping.bucketFixed
-            ? mapping.bucketFixed
-            : (mapping.bucket ? (row[mapping.bucket] ?? '').trim() : '');
+        if (mapping.bucket && bucketSelA.size > 0) {
+          const v = (row[mapping.bucket] ?? '').trim();
           if (v && !bucketSelA.has(v)) continue;
         }
         if (passesAllFilters(row, filtersA)) n++;
@@ -1312,10 +1309,8 @@ export default function LeadAttributionPage() {
       const mapping = mappingsB[i];
       if (!mapping) return;
       for (const row of u.rows) {
-        if (statusSelB.size > 0) {
-          const v = mapping.statusFixed
-            ? mapping.statusFixed
-            : (mapping.status ? (row[mapping.status] ?? '').trim() : '');
+        if (mapping.status && statusSelB.size > 0) {
+          const v = (row[mapping.status] ?? '').trim();
           if (v && !statusSelB.has(v)) continue;
         }
         if (passesAllFilters(row, filtersB)) n++;
@@ -2169,14 +2164,12 @@ function SourceMappingCardA({
   // Bucket picker for it to avoid exposing the synthetic column name.
   isDashboard?: boolean;
 }) {
-  // Bucket is required for uploaded sources — either pick a column OR assign
-  // a fixed value for all rows. The "fixed value" mode is for flat lead lists
-  // (e.g. "noida_sales.csv") that have no category column.
+  // Bucket is required for uploaded sources — pick the column from the CSV
+  // that categorizes leads (e.g. 'lead_temperature', 'sales_team', 'category').
+  // Column values are auto-added to the bucket pill filter so the upload's
+  // categories are included by default — the user can toggle them off via pills.
   const showBucketPicker = !isDashboard;
-  // Active mode is derived from state, not separate UI state — bucketFixed
-  // and bucket are mutually exclusive (only one is set at a time).
-  const bucketMode: 'column' | 'fixed' = mapping.bucketFixed ? 'fixed' : 'column';
-  const bucketMissing = showBucketPicker && !mapping.bucket && !mapping.bucketFixed;
+  const bucketMissing = showBucketPicker && !mapping.bucket;
 
   return (
     <div className="card p-3 space-y-2">
@@ -2208,87 +2201,27 @@ function SourceMappingCardA({
         onChange={v => setMapping(m => ({ ...m, date: v }))}
       />
       {showBucketPicker && (
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] text-surface-700 font-medium">Bucket *</span>
-            <div className="inline-flex rounded border border-surface-200 overflow-hidden text-[10px]">
-              <button
-                type="button"
-                onClick={() =>
-                  setMapping(m => ({ ...m, bucketFixed: undefined }))
-                }
-                className={`px-2 py-0.5 ${bucketMode === 'column'
-                  ? 'bg-brand-navy text-white'
-                  : 'bg-white text-surface-500 hover:text-surface-700'
-                }`}
-              >
-                From column
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  setMapping(m => ({
-                    ...m,
-                    bucket: undefined,
-                    // Default new fixed value to source label (sanitized) so it's
-                    // visible and editable; user replaces with whatever bucket
-                    // name they want (e.g. 'noida_sales', 'online_signup').
-                    bucketFixed: m.bucketFixed ?? (sourceLabel ?? 'custom').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40),
-                  }))
-                }
-                className={`px-2 py-0.5 border-l border-surface-200 ${bucketMode === 'fixed'
-                  ? 'bg-brand-navy text-white'
-                  : 'bg-white text-surface-500 hover:text-surface-700'
-                }`}
-              >
-                Fixed value
-              </button>
-            </div>
-          </div>
-          {bucketMode === 'column' ? (
-            <ColumnPicker
-              label=""
-              columns={data.columns}
-              value={mapping.bucket ?? ''}
-              onChange={v => setMapping(m => ({ ...m, bucket: v || undefined }))}
-              allowEmpty
-              emptyLabel="(no bucket column)"
-            />
-          ) : (
-            <div className="flex flex-col gap-1.5">
-              <input
-                type="text"
-                value={mapping.bucketFixed ?? ''}
-                onChange={e => setMapping(m => ({ ...m, bucketFixed: e.target.value || undefined }))}
-                placeholder="e.g. noida_sales, online, walk_in"
-                className="w-full text-xs px-2 py-1 border border-surface-200 rounded focus:outline-none focus:border-brand-pink"
-              />
-              <div className="flex flex-wrap gap-1 items-center">
-                <span className="text-[9px] text-surface-400">Quick pick:</span>
-                {DASHBOARD_BUCKETS.map(b => (
-                  <button
-                    key={b}
-                    type="button"
-                    onClick={() => setMapping(m => ({ ...m, bucketFixed: b }))}
-                    className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                      mapping.bucketFixed === b
-                        ? 'border-brand-pink bg-brand-pink/10 text-brand-pink'
-                        : 'border-surface-200 text-surface-500 hover:border-surface-300'
-                    }`}
-                  >
-                    {BUCKET_LABELS[b] ?? b}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {bucketMissing && (
+        <div>
+          <ColumnPicker
+            label="Bucket *"
+            columns={data.columns}
+            value={mapping.bucket ?? ''}
+            onChange={v => setMapping(m => ({ ...m, bucket: v || undefined }))}
+            allowEmpty
+            emptyLabel="(no bucket column)"
+          />
+          {bucketMissing ? (
             <p className="text-[10px] text-amber-700 mt-1 flex items-start gap-1">
               <AlertCircle size={10} className="mt-0.5 shrink-0" />
               <span>
-                Pick the column that categorizes leads (e.g. <code className="font-mono">category</code>,
-                {' '}<code className="font-mono">lead_status</code>) OR switch to <strong>Fixed value</strong> to tag every row in this file with one bucket.
+                Pick the column that categorizes leads (e.g. <code className="font-mono">lead_temperature</code>,
+                {' '}<code className="font-mono">category</code>, <code className="font-mono">sales_team</code>).
+                Unique values from this column will be auto-included in the bucket pill filter.
               </span>
+            </p>
+          ) : (
+            <p className="text-[10px] text-surface-400 mt-1">
+              All unique values from this column are auto-added to the bucket filter (pills below). Toggle individual values via the pills.
             </p>
           )}
         </div>
@@ -2351,14 +2284,11 @@ function SourceMappingCardB({
   mapping: ColumnMappingB;
   setMapping: (updater: (m: ColumnMappingB) => ColumnMappingB) => void;
 }) {
-  // Status mode: read from a column, OR apply one fixed value to every row.
-  // Mutually exclusive — bucketFixed/statusFixed take precedence when set.
-  const statusMode: 'column' | 'fixed' = mapping.statusFixed ? 'fixed' : 'column';
-  const statusMissing = !mapping.status && !mapping.statusFixed;
-  // Common payment status presets — quick picks so users don't have to type
-  // the same values repeatedly. They're free to enter anything else too.
-  const STATUS_PRESETS = ['success', 'paid', 'failed', 'pending', 'authSuccess'];
-
+  // Status is OPTIONAL. If your B file only contains valid (success/paid)
+  // rows, leave this empty and every row will count toward attribution. If
+  // your file mixes failed/pending/etc., map the column to enable filtering
+  // via the status pills. Column values are auto-added to the pill selection
+  // when first seen, so newly-uploaded statuses are included by default.
   return (
     <div className="card p-3 space-y-2">
       {sourceLabel && (
@@ -2383,84 +2313,20 @@ function SourceMappingCardB({
         value={mapping.date}
         onChange={v => setMapping(m => ({ ...m, date: v }))}
       />
-      <div className="space-y-1.5">
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] text-surface-700 font-medium">Status *</span>
-          <div className="inline-flex rounded border border-surface-200 overflow-hidden text-[10px]">
-            <button
-              type="button"
-              onClick={() => setMapping(m => ({ ...m, statusFixed: undefined }))}
-              className={`px-2 py-0.5 ${statusMode === 'column'
-                ? 'bg-brand-navy text-white'
-                : 'bg-white text-surface-500 hover:text-surface-700'
-              }`}
-            >
-              From column
-            </button>
-            <button
-              type="button"
-              onClick={() =>
-                setMapping(m => ({
-                  ...m,
-                  status: undefined,
-                  statusFixed: m.statusFixed ?? 'success',
-                }))
-              }
-              className={`px-2 py-0.5 border-l border-surface-200 ${statusMode === 'fixed'
-                ? 'bg-brand-navy text-white'
-                : 'bg-white text-surface-500 hover:text-surface-700'
-              }`}
-            >
-              Fixed value
-            </button>
-          </div>
-        </div>
-        {statusMode === 'column' ? (
-          <ColumnPicker
-            label=""
-            columns={data.columns}
-            value={mapping.status ?? ''}
-            onChange={v => setMapping(m => ({ ...m, status: v || undefined }))}
-            allowEmpty
-            emptyLabel="(no status column)"
-          />
-        ) : (
-          <div className="flex flex-col gap-1.5">
-            <input
-              type="text"
-              value={mapping.statusFixed ?? ''}
-              onChange={e => setMapping(m => ({ ...m, statusFixed: e.target.value || undefined }))}
-              placeholder="e.g. success, paid"
-              className="w-full text-xs px-2 py-1 border border-surface-200 rounded focus:outline-none focus:border-brand-pink"
-            />
-            <div className="flex flex-wrap gap-1 items-center">
-              <span className="text-[9px] text-surface-400">Quick pick:</span>
-              {STATUS_PRESETS.map(s => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setMapping(m => ({ ...m, statusFixed: s }))}
-                  className={`text-[10px] px-1.5 py-0.5 rounded border ${
-                    mapping.statusFixed === s
-                      ? 'border-brand-pink bg-brand-pink/10 text-brand-pink'
-                      : 'border-surface-200 text-surface-500 hover:border-surface-300'
-                  }`}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {statusMissing && (
-          <p className="text-[10px] text-amber-700 mt-1 flex items-start gap-1">
-            <AlertCircle size={10} className="mt-0.5 shrink-0" />
-            <span>
-              Pick the column that has payment status (e.g. <code className="font-mono">status</code>,
-              {' '}<code className="font-mono">payment_status</code>) OR switch to <strong>Fixed value</strong> to tag every row in this file with one status.
-            </span>
-          </p>
-        )}
+      <div>
+        <ColumnPicker
+          label="Status (optional)"
+          columns={data.columns}
+          value={mapping.status ?? ''}
+          onChange={v => setMapping(m => ({ ...m, status: v || undefined }))}
+          allowEmpty
+          emptyLabel="(no status — all rows counted)"
+        />
+        <p className="text-[10px] text-surface-400 mt-1">
+          {mapping.status
+            ? 'Column values are auto-added to the status filter (pills below). Use this when your file has mixed payment outcomes.'
+            : 'Skip if all rows in this file are valid payments. Map a status column (e.g. payment_status) only if your file mixes success / failed / pending.'}
+        </p>
       </div>
       {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
         if (mapping[key] === undefined) return null;
@@ -4198,15 +4064,12 @@ function ResultDetailSection({
                 const am = item.aMapping;
                 const bm = (item as any).bMapping as ColumnMappingB | undefined;
                 const name = aRow.callee_name || aRow.name || '';
-                // Read bucket from THIS pair's source mapping. Priority is:
-                // (1) bucketFixed — source-wide value assigned by the user
-                //     up-front when the CSV has no category column;
-                // (2) the bucket column on this row (synthetic '_bucket' for
-                //     dashboard pairs, user-mapped column for uploads);
-                // (3) legacy fallback to '_bucket' for old saved sessions.
-                const bucket = am?.bucketFixed
-                  ? am.bucketFixed
-                  : (am?.bucket ? aRow[am.bucket] : aRow._bucket) || '';
+                // Read bucket from THIS pair's source mapping. For dashboard
+                // pairs that's '_bucket' (synthetic); for uploaded pairs it's
+                // whatever column the user mapped on the corresponding
+                // SourceMappingCardA. Falls back to legacy `_bucket` for old
+                // saved sessions before bucket-per-source existed.
+                const bucket = (am?.bucket ? aRow[am.bucket] : aRow._bucket) || '';
                 // Read amount / paid using the matched pair's own bMapping —
                 // each B source can have different amount/paid column names.
                 const amountCol = bm?.amount;
