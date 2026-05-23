@@ -1514,11 +1514,39 @@ export default function LeadAttributionPage() {
               <div className="text-[10px] text-surface-500 mb-1.5">
                 {uploadsA.length === 0 ? 'Or upload extra files' : `${uploadsA.length} uploaded file${uploadsA.length === 1 ? '' : 's'}`}
               </div>
-              {uploadsA.map((u, i) => (
-                <div key={`a-${i}-${u.filename}`} className="mb-1.5">
-                  <LoadedFileChip data={u} onClear={() => removeSourceA('upload', i)} />
-                </div>
-              ))}
+              {uploadsA.map((u, i) => {
+                const m = mappingsUploadsA[i];
+                return (
+                  <div key={`a-${i}-${u.filename}`} className="mb-2 space-y-1">
+                    <LoadedFileChip data={u} onClear={() => removeSourceA('upload', i)} />
+                    {/* Bucket column picker — sits directly under each upload
+                        so the user picks "which column is the bucket" at the
+                        moment the file is loaded, not later in Step 2. Values
+                        from this column flow into the Bucket pills above
+                        and are auto-selected on first sight. */}
+                    {m && (
+                      <div className="pl-2 flex items-center gap-2 text-[11px]">
+                        <span className="text-surface-500 shrink-0">Bucket column:</span>
+                        <select
+                          value={m.bucket ?? ''}
+                          onChange={e =>
+                            setMappingsUploadsA(prev => prev.map((x, idx) =>
+                              idx === i ? { ...x, bucket: e.target.value || undefined } : x
+                            ))
+                          }
+                          className="flex-1 min-w-0 text-[11px] px-2 py-1 border border-surface-200 rounded focus:outline-none focus:border-brand-pink bg-white"
+                          title="Pick the column that categorizes leads in this file (e.g. lead_temperature, category). Values auto-populate the bucket pills above."
+                        >
+                          <option value="">(none — file not categorized)</option>
+                          {u.columns.map(c => (
+                            <option key={c} value={c}>{c}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
               <UploadDropZone
                 label={uploadsA.length === 0 ? 'Drop leads file' : 'Drop another file'}
                 sublabel={uploadsA.length === 0 ? 'merged into File A on top of dashboard fetch' : 'merged with the files above'}
@@ -1571,7 +1599,6 @@ export default function LeadAttributionPage() {
                     setMappingDashboardA(m => (m ? updater(m) : m))
                   }
                   showAutoHint={uploadsA.length === 0}
-                  isDashboard
                 />
               )}
               {uploadsA.map((file, i) => {
@@ -2151,26 +2178,19 @@ function LoadedFileChip({ data, onClear }: { data: CSVData; onClear: () => void 
 
 // Per-source mapping card for File A. One card per A source — dashboard
 // gets a card, each upload gets a card. Mapping is local to the card; the
-// dropdowns list ONLY that source's own columns.
+// dropdowns list ONLY that source's own columns. Bucket lives in Step 1
+// (next to the file upload chip) — Step 2 is now just Phone + Date + extras.
 function SourceMappingCardA({
-  sourceLabel, data, mapping, setMapping, showAutoHint = false, isDashboard = false,
+  sourceLabel, data, mapping, setMapping, showAutoHint = false,
 }: {
   sourceLabel: string | null;
   data: CSVData;
   mapping: ColumnMappingA;
   setMapping: (updater: (m: ColumnMappingA) => ColumnMappingA) => void;
   showAutoHint?: boolean;
-  // Dashboard slot has its bucket column hardcoded ('_bucket'); we hide the
-  // Bucket picker for it to avoid exposing the synthetic column name.
-  isDashboard?: boolean;
+  // (removed) isDashboard prop — the bucket picker that needed it lives in
+  // Step 1 now, so the dashboard slot is treated the same as any upload here.
 }) {
-  // Bucket is required for uploaded sources — pick the column from the CSV
-  // that categorizes leads (e.g. 'lead_temperature', 'sales_team', 'category').
-  // Column values are auto-added to the bucket pill filter so the upload's
-  // categories are included by default — the user can toggle them off via pills.
-  const showBucketPicker = !isDashboard;
-  const bucketMissing = showBucketPicker && !mapping.bucket;
-
   return (
     <div className="card p-3 space-y-2">
       {sourceLabel && (
@@ -2200,32 +2220,6 @@ function SourceMappingCardA({
         value={mapping.date}
         onChange={v => setMapping(m => ({ ...m, date: v }))}
       />
-      {showBucketPicker && (
-        <div>
-          <ColumnPicker
-            label="Bucket *"
-            columns={data.columns}
-            value={mapping.bucket ?? ''}
-            onChange={v => setMapping(m => ({ ...m, bucket: v || undefined }))}
-            allowEmpty
-            emptyLabel="(no bucket column)"
-          />
-          {bucketMissing ? (
-            <p className="text-[10px] text-amber-700 mt-1 flex items-start gap-1">
-              <AlertCircle size={10} className="mt-0.5 shrink-0" />
-              <span>
-                Pick the column that categorizes leads (e.g. <code className="font-mono">lead_temperature</code>,
-                {' '}<code className="font-mono">category</code>, <code className="font-mono">sales_team</code>).
-                Unique values from this column will be auto-included in the bucket pill filter.
-              </span>
-            </p>
-          ) : (
-            <p className="text-[10px] text-surface-400 mt-1">
-              All unique values from this column are auto-added to the bucket filter (pills below). Toggle individual values via the pills.
-            </p>
-          )}
-        </div>
-      )}
       {mapping.extras.map((extra, idx) => (
         <ExtraMappingRow
           key={idx}
@@ -2284,11 +2278,10 @@ function SourceMappingCardB({
   mapping: ColumnMappingB;
   setMapping: (updater: (m: ColumnMappingB) => ColumnMappingB) => void;
 }) {
-  // Status is OPTIONAL. If your B file only contains valid (success/paid)
-  // rows, leave this empty and every row will count toward attribution. If
-  // your file mixes failed/pending/etc., map the column to enable filtering
-  // via the status pills. Column values are auto-added to the pill selection
-  // when first seen, so newly-uploaded statuses are included by default.
+  // Status mapping has been removed entirely from File B. All B rows now
+  // count as valid payments. If a B file mixes failed/pending/success rows
+  // and the user wants to exclude some, they can add a custom filter in
+  // Step 3 instead — keeps Step 2 a clean "what is this column" exercise.
   return (
     <div className="card p-3 space-y-2">
       {sourceLabel && (
@@ -2313,21 +2306,6 @@ function SourceMappingCardB({
         value={mapping.date}
         onChange={v => setMapping(m => ({ ...m, date: v }))}
       />
-      <div>
-        <ColumnPicker
-          label="Status (optional)"
-          columns={data.columns}
-          value={mapping.status ?? ''}
-          onChange={v => setMapping(m => ({ ...m, status: v || undefined }))}
-          allowEmpty
-          emptyLabel="(no status — all rows counted)"
-        />
-        <p className="text-[10px] text-surface-400 mt-1">
-          {mapping.status
-            ? 'Column values are auto-added to the status filter (pills below). Use this when your file has mixed payment outcomes.'
-            : 'Skip if all rows in this file are valid payments. Map a status column (e.g. payment_status) only if your file mixes success / failed / pending.'}
-        </p>
-      </div>
       {(['amount', 'amountPaid'] as OptionalMappingB[]).map(key => {
         if (mapping[key] === undefined) return null;
         return (
@@ -2733,45 +2711,64 @@ function ResultsBlock({
         )}
       </div>
 
-      <div className="card overflow-hidden">
-        <table className="w-full text-sm">
-          <tbody>
-            <FunnelRow label="Total leads in File A" count={totalA} total={totalA} bold />
-            <FunnelRow label="Phone exists in File B (ever)" count={keyMatched} total={totalA} indent={1} />
-            <FunnelRow label="B before A — pre-existing customers" count={preExisting} total={totalA} indent={2} chip="amber" chipLabel="Pre-existing" />
-            <FunnelRow label="B after A — attributed" count={attributed} total={totalA} indent={2} chip="green" chipLabel="Attributed" emphasize />
-            <FunnelRow label="No match in File B" count={unmatched} total={totalA} indent={1} muted />
-          </tbody>
-        </table>
+      {/* Breakdown drill-down — collapsible card that breaks each KPI down
+          by source AND by bucket / source-value. Defaults closed so the page
+          stays compact; tap to expand. Pure derived view — no extra fetches,
+          all computed from `results` already in memory. */}
+      <div className="mb-3">
+        <KPIBreakdown
+          results={results}
+          hasAmount={hasAmount}
+          hasPaid={hasPaid}
+          bExtras={bExtras}
+        />
       </div>
 
-      {(hasAmount || hasPaid) && (
-        <div className="card p-3 mt-3">
-          <div className="text-[11px] uppercase tracking-wider text-surface-500 mb-2">Attributed revenue</div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
-            {hasAmount && (
-              <div>
-                <div className="text-xs text-surface-500">Total amount (sum of {mappingB.amount})</div>
-                <div className="text-lg font-semibold text-brand-navy">{fmtINR(revenueTotal)}</div>
-                <div className="text-[10px] text-surface-400 mt-1">Includes future EMI installments. Optimistic.</div>
-              </div>
-            )}
-            {hasPaid && (
-              <div>
-                <div className="text-xs text-surface-500">Paid amount (sum of {mappingB.amountPaid})</div>
-                <div className="text-lg font-semibold text-brand-navy">{fmtINR(revenuePaid)}</div>
-                <div className="text-[10px] text-surface-400 mt-1">Only first-installment receipts. Conservative.</div>
+      {/* Funnel + Attributed revenue side-by-side. They share the same scope
+          (Step 4 — top-line summary) and have similar widths, so packing
+          them into one row saves a lot of vertical space without losing
+          readability. Falls back to stacked on narrow viewports. */}
+      <div className={`grid grid-cols-1 ${(hasAmount || hasPaid) ? 'md:grid-cols-2' : ''} gap-3`}>
+        <div className="card overflow-hidden">
+          <table className="w-full text-sm">
+            <tbody>
+              <FunnelRow label="Total leads in File A" count={totalA} total={totalA} bold />
+              <FunnelRow label="Phone exists in File B (ever)" count={keyMatched} total={totalA} indent={1} />
+              <FunnelRow label="B before A — pre-existing customers" count={preExisting} total={totalA} indent={2} chip="amber" chipLabel="Pre-existing" />
+              <FunnelRow label="B after A — attributed" count={attributed} total={totalA} indent={2} chip="green" chipLabel="Attributed" emphasize />
+              <FunnelRow label="No match in File B" count={unmatched} total={totalA} indent={1} muted />
+            </tbody>
+          </table>
+        </div>
+
+        {(hasAmount || hasPaid) && (
+          <div className="card p-3">
+            <div className="text-[11px] uppercase tracking-wider text-surface-500 mb-2">Attributed revenue</div>
+            <div className="grid grid-cols-1 gap-3 text-sm">
+              {hasAmount && (
+                <div>
+                  <div className="text-xs text-surface-500">Total amount (sum of {mappingB.amount})</div>
+                  <div className="text-lg font-semibold text-brand-navy">{fmtINR(revenueTotal)}</div>
+                  <div className="text-[10px] text-surface-400 mt-1">Includes future EMI installments. Optimistic.</div>
+                </div>
+              )}
+              {hasPaid && (
+                <div>
+                  <div className="text-xs text-surface-500">Paid amount (sum of {mappingB.amountPaid})</div>
+                  <div className="text-lg font-semibold text-brand-navy">{fmtINR(revenuePaid)}</div>
+                  <div className="text-[10px] text-surface-400 mt-1">Only first-installment receipts. Conservative.</div>
+                </div>
+              )}
+            </div>
+            {hasAmount && hasPaid && revenueTotal > 0 && (
+              <div className="text-[11px] text-surface-500 mt-2 pt-2 border-t border-surface-100">
+                Realized so far: <strong className="text-brand-navy">{((revenuePaid / revenueTotal) * 100).toFixed(0)}%</strong>{' '}
+                · Remaining EMI exposure: <strong className="text-brand-navy">{fmtINR(revenueTotal - revenuePaid)}</strong>
               </div>
             )}
           </div>
-          {hasAmount && hasPaid && revenueTotal > 0 && (
-            <div className="text-[11px] text-surface-500 mt-2 pt-2 border-t border-surface-100">
-              Realized so far: <strong className="text-brand-navy">{((revenuePaid / revenueTotal) * 100).toFixed(0)}%</strong>{' '}
-              · Remaining EMI exposure: <strong className="text-brand-navy">{fmtINR(revenueTotal - revenuePaid)}</strong>
-            </div>
-          )}
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Product pivot — only renders when any B source has Product mapped.
           Aggregates attributed matches by product name (read from each pair's
@@ -2809,66 +2806,20 @@ function ResultsBlock({
         bExtras={bExtras}
       />
 
-      {/* Inline previews — expandable cards that let the user spot-check
-          matches without downloading. Each section is independently
-          collapsible and paginated (25 rows per page). */}
-      <ResultDetailSection
-        title="Attributed"
-        count={results.attributedPairs.length}
-        chip="green"
-        matchedPairs={results.attributedPairs}
-        mappingA={mappingA}
-        mappingB={mappingB}
-        aExtras={aExtras}
-        bExtras={bExtras}
-      />
-      <ResultDetailSection
-        title="Pre-existing"
-        count={results.preExistingPairs.length}
-        chip="amber"
-        matchedPairs={results.preExistingPairs}
-        mappingA={mappingA}
-        mappingB={mappingB}
-        aExtras={aExtras}
-        bExtras={bExtras}
-      />
-      <ResultDetailSection
-        title="Unmatched"
-        count={results.unmatchedRows.length}
-        chip="gray"
+      {/* Inline previews — three-tab card. One row of pills (Attributed,
+          Pre-existing, Unmatched) acts as both the section header AND the
+          tab switcher. Click a tab to expand its preview table inline; click
+          again to collapse. Each tab's download button lives inside its
+          expanded view, so we no longer need a separate download row below. */}
+      <PreviewTabs
+        attributedPairs={results.attributedPairs}
+        preExistingPairs={results.preExistingPairs}
         unmatchedRows={results.unmatchedRows}
         mappingA={mappingA}
         mappingB={mappingB}
         aExtras={aExtras}
         bExtras={bExtras}
       />
-
-      <div className="flex flex-wrap gap-2 mt-3">
-        <button
-          type="button"
-          onClick={() => downloadCSV(`attributed_leads_${Date.now()}.csv`, flattenPairs(results.attributedPairs))}
-          disabled={results.attributedPairs.length === 0}
-          className="text-xs px-3 py-1.5 rounded-md border border-emerald-200 bg-emerald-50 text-emerald-700 font-medium hover:bg-emerald-100 inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Download size={12} /> Attributed ({fmtInt(results.attributedPairs.length)})
-        </button>
-        <button
-          type="button"
-          onClick={() => downloadCSV(`preexisting_leads_${Date.now()}.csv`, flattenPairs(results.preExistingPairs))}
-          disabled={results.preExistingPairs.length === 0}
-          className="text-xs px-3 py-1.5 rounded-md border border-amber-200 bg-amber-50 text-amber-700 font-medium hover:bg-amber-100 inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Download size={12} /> Pre-existing ({fmtInt(results.preExistingPairs.length)})
-        </button>
-        <button
-          type="button"
-          onClick={() => downloadCSV(`unmatched_leads_${Date.now()}.csv`, results.unmatchedRows)}
-          disabled={results.unmatchedRows.length === 0}
-          className="text-xs px-3 py-1.5 rounded-md border border-surface-200 bg-white text-surface-700 font-medium hover:bg-surface-50 inline-flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          <Download size={12} /> Unmatched ({fmtInt(results.unmatchedRows.length)})
-        </button>
-      </div>
 
     </>
   );
@@ -3844,26 +3795,31 @@ function Visualizations({
       <div className="text-[11px] uppercase tracking-wider text-surface-500 px-1">
         Visualizations
       </div>
-      <CollapsibleCard
-        title="Share by source"
-        subtitle="Donuts showing % share of leads, customers, and revenue by File A source. Click any source in the legend to exclude it."
-      >
-        <MultiDonutChart rows={sourceRows} metrics={sourceMetrics} sourceWord="Sources" />
-      </CollapsibleCard>
-      <CollapsibleCard
-        title="Share by product"
-        subtitle={hasProductMapping
-          ? 'Customers and revenue split by product (read from each B file\'s Product column).'
-          : 'Add a "Product" mapping on any File B card to enable this view.'}
-      >
-        {hasProductMapping ? (
-          <MultiDonutChart rows={productRows} metrics={productMetrics} sourceWord="Products" />
-        ) : (
-          <div className="text-[12px] text-surface-400 py-6 text-center">
-            No product mapping detected on any File B source.
-          </div>
-        )}
-      </CollapsibleCard>
+      {/* Source + Product cards drop into a 2-col grid (half the vertical
+          space of the old stacked layout). Trend over time stays full-width
+          below because line charts need horizontal room to read. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <CollapsibleCard
+          title="Share by source"
+          subtitle="Donuts showing % share of leads, customers, and revenue by File A source. Click any source in the legend to exclude it."
+        >
+          <MultiDonutChart rows={sourceRows} metrics={sourceMetrics} sourceWord="Sources" />
+        </CollapsibleCard>
+        <CollapsibleCard
+          title="Share by product"
+          subtitle={hasProductMapping
+            ? 'Customers and revenue split by product (read from each B file\'s Product column).'
+            : 'Add a "Product" mapping on any File B card to enable this view.'}
+        >
+          {hasProductMapping ? (
+            <MultiDonutChart rows={productRows} metrics={productMetrics} sourceWord="Products" />
+          ) : (
+            <div className="text-[12px] text-surface-400 py-6 text-center">
+              No product mapping detected on any File B source.
+            </div>
+          )}
+        </CollapsibleCard>
+      </div>
       <CollapsibleCard
         title="Trend over time"
         subtitle="Daily counts of leads created (File A), customers attributed, and revenue — plotted by the lead-creation date (cohort view)."
@@ -3977,6 +3933,478 @@ function DuplicatesCard({
               </button>
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Three-tab preview card. Replaces the previous stack of three separate
+// ResultDetailSection rows + the duplicate download-buttons strip below
+// them. One row of pills acts as the section header AND the tab switcher;
+// the selected tab's content (full preview table + its own download button)
+// renders inline beneath. Selecting the same tab again collapses it.
+function PreviewTabs({
+  attributedPairs, preExistingPairs, unmatchedRows,
+  mappingA, mappingB, aExtras, bExtras,
+}: {
+  attributedPairs: MatchedPair[];
+  preExistingPairs: MatchedPair[];
+  unmatchedRows: Record<string, string>[];
+  mappingA: ColumnMappingA;
+  mappingB: ColumnMappingB;
+  aExtras: ExtraMapping[];
+  bExtras: ExtraMapping[];
+}) {
+  type TabKey = 'attributed' | 'preexisting' | 'unmatched';
+  const [active, setActive] = useState<TabKey | null>(null);
+
+  const tabs: Array<{
+    key: TabKey;
+    label: string;
+    count: number;
+    chipClass: string;
+    activeClass: string;
+  }> = [
+    {
+      key: 'attributed',
+      label: 'Attributed',
+      count: attributedPairs.length,
+      chipClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+      activeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+    },
+    {
+      key: 'preexisting',
+      label: 'Pre-existing',
+      count: preExistingPairs.length,
+      chipClass: 'bg-amber-50 text-amber-700 border-amber-200',
+      activeClass: 'bg-amber-100 text-amber-800 border-amber-300',
+    },
+    {
+      key: 'unmatched',
+      label: 'Unmatched',
+      count: unmatchedRows.length,
+      chipClass: 'bg-surface-100 text-surface-600 border-surface-200',
+      activeClass: 'bg-surface-200 text-surface-700 border-surface-300',
+    },
+  ];
+
+  function toggle(key: TabKey) {
+    setActive(prev => (prev === key ? null : key));
+  }
+
+  return (
+    <div className="card overflow-hidden mt-3">
+      {/* Tab row — same affordance as the old three separate accordion rows,
+          just packed into one. */}
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-surface-100">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {tabs.map(t => {
+            const isActive = active === t.key;
+            return (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => toggle(t.key)}
+                disabled={t.count === 0}
+                className={`text-xs px-2.5 py-1 rounded-md border font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  isActive ? t.activeClass : t.chipClass
+                }`}
+              >
+                {t.label} <span className="tabular-nums">({fmtInt(t.count)})</span>
+              </button>
+            );
+          })}
+        </div>
+        <span className="text-[10px] text-surface-400">
+          {active ? 'Tap pill again to close' : 'Tap a pill to preview rows'}
+        </span>
+      </div>
+
+      {/* Selected tab body — full preview table + a download button for
+          THIS bucket only. No tab selected → empty placeholder. */}
+      {active === 'attributed' && (
+        <PreviewTable
+          matchedPairs={attributedPairs}
+          mappingA={mappingA}
+          mappingB={mappingB}
+          aExtras={aExtras}
+          bExtras={bExtras}
+          downloadName={`attributed_leads_${Date.now()}.csv`}
+          downloadStyle="emerald"
+        />
+      )}
+      {active === 'preexisting' && (
+        <PreviewTable
+          matchedPairs={preExistingPairs}
+          mappingA={mappingA}
+          mappingB={mappingB}
+          aExtras={aExtras}
+          bExtras={bExtras}
+          downloadName={`preexisting_leads_${Date.now()}.csv`}
+          downloadStyle="amber"
+        />
+      )}
+      {active === 'unmatched' && (
+        <PreviewTable
+          unmatchedRows={unmatchedRows}
+          mappingA={mappingA}
+          mappingB={mappingB}
+          aExtras={aExtras}
+          bExtras={bExtras}
+          downloadName={`unmatched_leads_${Date.now()}.csv`}
+          downloadStyle="gray"
+        />
+      )}
+    </div>
+  );
+}
+
+// Renamed-and-narrowed version of ResultDetailSection — only the inner
+// "open" body (preview table + load-more + download). The collapse toggle
+// is owned by PreviewTabs now. Kept as its own component so the JSX stays
+// readable, and so each tab can mount/unmount independently (which resets
+// the showCount pagination naturally).
+function PreviewTable({
+  matchedPairs, unmatchedRows,
+  mappingA, mappingB, aExtras, bExtras,
+  downloadName, downloadStyle,
+}: {
+  matchedPairs?: MatchedPair[];
+  unmatchedRows?: Record<string, string>[];
+  mappingA: ColumnMappingA;
+  mappingB: ColumnMappingB;
+  aExtras: ExtraMapping[];
+  bExtras: ExtraMapping[];
+  downloadName: string;
+  downloadStyle: 'emerald' | 'amber' | 'gray';
+}) {
+  const [showCount, setShowCount] = useState(25);
+  const isUnmatched = !matchedPairs;
+  const totalLen = isUnmatched
+    ? (unmatchedRows?.length ?? 0)
+    : (matchedPairs?.length ?? 0);
+  const hasMore = totalLen > showCount;
+
+  if (totalLen === 0) {
+    return (
+      <div className="px-3 py-4 text-[12px] text-surface-400 text-center">
+        Nothing to show for this bucket.
+      </div>
+    );
+  }
+
+  const dlClass =
+    downloadStyle === 'emerald' ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100' :
+    downloadStyle === 'amber'   ? 'border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100' :
+                                  'border-surface-200 bg-white text-surface-700 hover:bg-surface-50';
+
+  const rows = isUnmatched
+    ? (unmatchedRows ?? []).slice(0, showCount).map(r => ({
+        a: r, b: {} as Record<string, string>,
+        aDateIso: parseDate(r[mappingA.date] ?? ''),
+        bDateIso: null, lagDays: null,
+        aMapping: mappingA, bMapping: mappingB,
+        aSourceLabel: '', bSourceLabel: '',
+      }))
+    : (matchedPairs ?? []).slice(0, showCount);
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-xs">
+        <thead className="bg-surface-50 text-[10px] uppercase tracking-wider text-surface-500">
+          <tr>
+            <th className="text-left py-2 px-3 whitespace-nowrap">Phone</th>
+            <th className="text-left py-2 px-3 whitespace-nowrap">Name</th>
+            <th className="text-left py-2 px-3 whitespace-nowrap">Bucket</th>
+            {aExtras.map(e => (
+              <th key={`ha-${e.label}`} className="text-left py-2 px-3 whitespace-nowrap">{e.label}</th>
+            ))}
+            <th className="text-right py-2 px-3 whitespace-nowrap">A date</th>
+            {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">B date</th>}
+            {!isUnmatched && <th className="text-right py-2 px-3 whitespace-nowrap">Lag</th>}
+            {!isUnmatched && mappingB.amount && <th className="text-right py-2 px-3 whitespace-nowrap">Amount</th>}
+            {!isUnmatched && mappingB.amountPaid && <th className="text-right py-2 px-3 whitespace-nowrap">Paid</th>}
+            {!isUnmatched && bExtras.map(e => (
+              <th key={`hb-${e.label}`} className="text-left py-2 px-3 whitespace-nowrap">{e.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((item, i) => {
+            const aRow = item.a;
+            const bRow = item.b;
+            const am = item.aMapping;
+            const bm = (item as any).bMapping as ColumnMappingB | undefined;
+            const name = aRow.callee_name || aRow.name || '';
+            const bucket = (am?.bucket ? aRow[am.bucket] : aRow._bucket) || '';
+            const amountCol = bm?.amount;
+            const paidCol = bm?.amountPaid;
+            const amountStr = bRow && amountCol ? (bRow[amountCol] ?? '') : '';
+            const amountNum = parseFloat(amountStr);
+            const paidStr   = bRow && paidCol ? (bRow[paidCol] ?? '') : '';
+            const paidNum   = parseFloat(paidStr);
+            return (
+              <tr key={i} className="border-b border-surface-100 last:border-b-0 hover:bg-surface-50/50">
+                <td className="py-2 px-3 tabular-nums text-surface-700 whitespace-nowrap">
+                  {normalizePhone(aRow[mappingA.phone] ?? '') || <span className="text-surface-300">—</span>}
+                </td>
+                <td className="py-2 px-3 text-surface-700">
+                  {name || <span className="text-surface-300">—</span>}
+                </td>
+                <td className="py-2 px-3">
+                  {bucket ? (
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                      bucket === 'top_priority'
+                        ? 'bg-emerald-50 text-emerald-700'
+                        : 'bg-surface-100 text-surface-600'
+                    }`}>
+                      {BUCKET_LABELS[bucket] || bucket}
+                    </span>
+                  ) : <span className="text-surface-300">—</span>}
+                </td>
+                {aExtras.map((e, ix) => {
+                  const val = aRow[e.column] ?? '';
+                  return (
+                    <td key={`ca-${i}-${ix}`} className="py-2 px-3 text-surface-700 max-w-[140px] truncate" title={val}>
+                      {val || <span className="text-surface-300">—</span>}
+                    </td>
+                  );
+                })}
+                <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                  {item.aDateIso || <span className="text-surface-300">—</span>}
+                </td>
+                {!isUnmatched && (
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                    {item.bDateIso || <span className="text-surface-300">—</span>}
+                  </td>
+                )}
+                {!isUnmatched && (
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-500 whitespace-nowrap">
+                    {item.lagDays == null
+                      ? <span className="text-surface-300">—</span>
+                      : `${item.lagDays}d`}
+                  </td>
+                )}
+                {!isUnmatched && mappingB.amount && (
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                    {isFinite(amountNum) && amountNum > 0
+                      ? fmtINR(amountNum)
+                      : <span className="text-surface-300">—</span>}
+                  </td>
+                )}
+                {!isUnmatched && mappingB.amountPaid && (
+                  <td className="py-2 px-3 text-right tabular-nums text-surface-700 whitespace-nowrap">
+                    {isFinite(paidNum) && paidNum > 0
+                      ? fmtINR(paidNum)
+                      : <span className="text-surface-300">—</span>}
+                  </td>
+                )}
+                {!isUnmatched && bExtras.map((e, ix) => {
+                  const val = bRow[e.column] ?? '';
+                  return (
+                    <td key={`cb-${i}-${ix}`} className="py-2 px-3 text-surface-700 max-w-[140px] truncate" title={val}>
+                      {val || <span className="text-surface-300">—</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="px-3 py-2 flex items-center justify-between border-t border-surface-100 bg-surface-50/50">
+        <span className="text-[10px] text-surface-500">
+          Showing {Math.min(showCount, totalLen)} of {fmtInt(totalLen)}
+        </span>
+        <div className="flex items-center gap-2">
+          {hasMore && (
+            <button
+              type="button"
+              onClick={() => setShowCount(c => c + 25)}
+              className="text-[11px] text-brand-pink hover:underline"
+            >
+              Show next 25
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => downloadCSV(downloadName,
+              isUnmatched ? (unmatchedRows ?? []) : flattenPairs(matchedPairs ?? []))}
+            className={`text-[11px] px-2.5 py-1 rounded-md border font-medium inline-flex items-center gap-1.5 ${dlClass}`}
+          >
+            <Download size={11} /> Download all {fmtInt(totalLen)}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// KPI breakdown — drill-down card showing each top-line KPI broken out by
+// source AND by bucket (for counts) or by B-side source value (for revenue).
+// Defaults closed; on open shows four sections:
+//   Leads   : per A source → per bucket value     (all A rows, filtered)
+//   Attributed: per A source → per bucket value   (just attributed pairs)
+//   Revenue (total): per B-side "source" extra    (e.g. noida / online)
+//   Revenue (paid) : same shape, uses amountPaid  (when available)
+//
+// All values are derived from `results` — no extra computation passes over
+// the raw uploads. Bucket value defaults to '(no bucket)' when the source
+// has no bucket column mapped, so even uncategorized files contribute a
+// readable line in the breakdown.
+function KPIBreakdown({
+  results, hasAmount, hasPaid, bExtras,
+}: {
+  results: Results;
+  hasAmount: boolean;
+  hasPaid: boolean;
+  bExtras: ExtraMapping[];
+}) {
+  const [open, setOpen] = useState(false);
+
+  // sourceLabel → bucketValue → count. Used for both Leads and Attributed.
+  type CountAgg = Map<string, Map<string, number>>;
+
+  const leadsAgg: CountAgg = useMemo(() => {
+    const agg: CountAgg = new Map();
+    const ensure = (label: string) => {
+      if (!agg.has(label)) agg.set(label, new Map());
+      return agg.get(label)!;
+    };
+    const walk = (row: Record<string, string>, mapping: ColumnMappingA, label: string) => {
+      const bucket = (mapping.bucket ? (row[mapping.bucket] ?? '') : '').trim() || '(no bucket)';
+      const buckets = ensure(label);
+      buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+    };
+    for (const p of results.attributedPairs)  walk(p.a, p.aMapping, p.aSourceLabel);
+    for (const p of results.preExistingPairs) walk(p.a, p.aMapping, p.aSourceLabel);
+    for (const u of results.unmatchedSources) walk(u.row, u.mapping, u.label);
+    return agg;
+  }, [results]);
+
+  const attrAgg: CountAgg = useMemo(() => {
+    const agg: CountAgg = new Map();
+    for (const p of results.attributedPairs) {
+      const bucket = (p.aMapping.bucket ? (p.a[p.aMapping.bucket] ?? '') : '').trim() || '(no bucket)';
+      if (!agg.has(p.aSourceLabel)) agg.set(p.aSourceLabel, new Map());
+      const buckets = agg.get(p.aSourceLabel)!;
+      buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+    }
+    return agg;
+  }, [results]);
+
+  // Revenue breakdown — by the B-side "Source" extra (a column the user
+  // mapped via "+ Source" — typically holds 'noida' / 'online' / channel).
+  // Falls back to the B source file label if no Source extra is mapped.
+  const revAgg = useMemo(() => {
+    const total = new Map<string, number>();
+    const paid  = new Map<string, number>();
+    for (const p of results.attributedPairs) {
+      const sourceCol = p.bMapping.extras.find(e => e.label === 'Source')?.column;
+      const key = (sourceCol ? (p.b[sourceCol] ?? '').trim() : '') || p.bSourceLabel || '(no source)';
+      const amt = p.bMapping.amount     ? (parseFloat(p.b[p.bMapping.amount]     ?? 'NaN') || 0) : 0;
+      const pd  = p.bMapping.amountPaid ? (parseFloat(p.b[p.bMapping.amountPaid] ?? 'NaN') || 0) : 0;
+      total.set(key, (total.get(key) ?? 0) + amt);
+      paid.set(key,  (paid.get(key)  ?? 0) + pd);
+    }
+    return { total, paid };
+  }, [results]);
+
+  // Pretty-print a bucket key (top_priority → Top Priority). Falls back to
+  // the raw value for custom uploads (e.g. 'hot' stays 'hot').
+  const bucketLabel = (b: string) => BUCKET_LABELS[b] ?? b;
+
+  const renderCountSection = (
+    title: string, total: number, agg: CountAgg, accent: string
+  ) => (
+    <div className="card p-3">
+      <div className="flex items-baseline justify-between mb-2">
+        <div className="text-xs font-medium text-brand-navy">{title}</div>
+        <div className="text-sm font-semibold tabular-nums" style={{ color: accent }}>{fmtInt(total)}</div>
+      </div>
+      <div className="space-y-1.5">
+        {Array.from(agg.entries()).sort(([, a], [, b]) => {
+          const sa = Array.from(a.values()).reduce((s, n) => s + n, 0);
+          const sb = Array.from(b.values()).reduce((s, n) => s + n, 0);
+          return sb - sa;
+        }).map(([label, buckets]) => {
+          const sourceTotal = Array.from(buckets.values()).reduce((s, n) => s + n, 0);
+          const sortedBuckets = Array.from(buckets.entries()).sort((a, b) => b[1] - a[1]);
+          return (
+            <div key={label} className="border-l-2 pl-2" style={{ borderColor: accent }}>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-surface-700 truncate" title={label}>{label}</span>
+                <span className="tabular-nums text-surface-700 shrink-0 ml-2">{fmtInt(sourceTotal)}</span>
+              </div>
+              <div className="pl-3 pt-0.5 space-y-0.5">
+                {sortedBuckets.map(([b, n]) => (
+                  <div key={b} className="flex items-center justify-between text-[10px] text-surface-500">
+                    <span className="truncate" title={b}>{bucketLabel(b)}</span>
+                    <span className="tabular-nums shrink-0 ml-2">{fmtInt(n)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+        {agg.size === 0 && (
+          <div className="text-[11px] text-surface-400 text-center py-2">No data.</div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderRevenueSection = (title: string, total: number, agg: Map<string, number>) => (
+    <div className="card p-3">
+      <div className="flex items-baseline justify-between mb-2">
+        <div className="text-xs font-medium text-brand-navy">{title}</div>
+        <div className="text-sm font-semibold text-brand-navy tabular-nums">{fmtINR(total)}</div>
+      </div>
+      <div className="space-y-1">
+        {Array.from(agg.entries()).sort((a, b) => b[1] - a[1]).map(([key, amt]) => (
+          <div key={key} className="flex items-center justify-between text-[11px] border-l-2 border-emerald-200 pl-2">
+            <span className="text-surface-700 truncate" title={key}>{key || '(empty)'}</span>
+            <span className="tabular-nums text-surface-700 shrink-0 ml-2">{fmtINR(amt)}</span>
+          </div>
+        ))}
+        {agg.size === 0 && (
+          <div className="text-[11px] text-surface-400 text-center py-2">No revenue.</div>
+        )}
+      </div>
+      {bExtras.every(e => e.label !== 'Source') && (
+        <div className="text-[10px] text-surface-400 mt-2 pt-2 border-t border-surface-100">
+          Tip: map a <code className="font-mono">Source</code> column on File B (e.g. <code className="font-mono">source</code> → noida/online) to see revenue split by channel here. Falling back to file label.
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="card overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full px-3 py-2.5 flex items-center justify-between hover:bg-surface-50/60 transition-colors text-left"
+        aria-expanded={open}
+      >
+        <div className="flex items-center gap-2">
+          {open ? <ChevronDown size={14} className="text-surface-500" /> : <ChevronRight size={14} className="text-surface-500" />}
+          <span className="text-xs font-medium text-brand-navy">Breakdown</span>
+          <span className="text-[10px] text-surface-500">drill into each KPI by source and bucket</span>
+        </div>
+        <span className="text-[10px] text-surface-400 uppercase tracking-wider">
+          {open ? 'Tap to collapse' : 'Tap to expand'}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-1 border-t border-surface-100">
+          <div className={`grid grid-cols-1 md:grid-cols-2 gap-3 ${(hasAmount || hasPaid) ? 'lg:grid-cols-2' : ''}`}>
+            {renderCountSection('Leads', results.totalA, leadsAgg, '#1B1A36')}
+            {renderCountSection('Attributed', results.attributed, attrAgg, '#10B981')}
+            {hasAmount && renderRevenueSection('Revenue (total)', results.revenueTotal, revAgg.total)}
+            {hasPaid && renderRevenueSection('Revenue (paid)', results.revenuePaid, revAgg.paid)}
+          </div>
         </div>
       )}
     </div>
