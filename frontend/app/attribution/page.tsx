@@ -1046,6 +1046,26 @@ export default function LeadAttributionPage() {
   const [results, setResults] = useState<Results | null>(null);
   const [running, setRunning] = useState(false);
 
+  // Step open/close state. All 3 steps default to open before the first run;
+  // once the first successful `results` lands, we collapse them so the
+  // top-line numbers + funnel sit at the top of the page. The user can still
+  // tap any step header to re-expand it for edits. The auto-collapse only
+  // fires once per session so re-runs don't override a user's intentional
+  // re-expansion.
+  const [stepOpen, setStepOpen] = useState<Record<1 | 2 | 3, boolean>>({
+    1: true, 2: true, 3: true,
+  });
+  const autoCollapsedOnceRef = useRef(false);
+  useEffect(() => {
+    if (results && !autoCollapsedOnceRef.current) {
+      autoCollapsedOnceRef.current = true;
+      setStepOpen({ 1: false, 2: false, 3: false });
+    }
+  }, [results]);
+  function toggleStep(n: 1 | 2 | 3) {
+    setStepOpen(prev => ({ ...prev, [n]: !prev[n] }));
+  }
+
   // Per-source auto-mapping. When the dashboard fetch arrives or a new file is
   // uploaded, initialize a mapping for it (auto-detect Phone/Date/Amount/etc
   // from its own columns). When a source is removed, drop its mapping. We sync
@@ -1480,7 +1500,24 @@ export default function LeadAttributionPage() {
 
       {/* ---- Step 1: Sources ---- */}
       <section>
-        <h2 className="text-sm font-medium text-brand-navy mb-2">Step 1 — Sources</h2>
+        <StepHeader
+          n={1}
+          title="Sources"
+          open={stepOpen[1]}
+          onToggle={() => toggleStep(1)}
+          summary={(() => {
+            const parts: string[] = [];
+            const dashRows = dashboardData?.rows.length ?? 0;
+            const uploadCount = uploadsA.length + uploadsB.length;
+            const totalRows = dashRows + uploadsA.reduce((s, u) => s + u.rows.length, 0)
+                            + uploadsB.reduce((s, u) => s + u.rows.length, 0);
+            if (dashboardData) parts.push('dashboard');
+            if (uploadCount > 0) parts.push(`${uploadCount} upload${uploadCount === 1 ? '' : 's'}`);
+            if (totalRows > 0) parts.push(`${fmtInt(totalRows)} rows`);
+            return parts.join(' · ') || 'no sources yet';
+          })()}
+        />
+        {stepOpen[1] && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {/* File A — Dashboard + Upload coexist. Both contribute rows. */}
           <div className="card p-3 space-y-3">
@@ -1575,12 +1612,39 @@ export default function LeadAttributionPage() {
             />
           </div>
         </div>
+        )}
       </section>
 
       {/* ---- Step 2: Column mapping ---- */}
       {fileA && fileB && (
         <section>
-          <h2 className="text-sm font-medium text-brand-navy mb-2">Step 2 — Map columns</h2>
+          <StepHeader
+            n={2}
+            title="Map columns"
+            open={stepOpen[2]}
+            onToggle={() => toggleStep(2)}
+            summary={(() => {
+              // Count missing required mappings: each A source needs Phone +
+              // Date; each B source needs Phone + Date. (Amount/Paid optional.)
+              let missing = 0;
+              let mapped = 0;
+              const checkA = (m: ColumnMappingA | null) => {
+                if (!m) return;
+                mapped++;
+                if (!m.phone || !m.date) missing++;
+              };
+              checkA(mappingDashboardA);
+              mappingsUploadsA.forEach(checkA);
+              for (const m of mappingsB) {
+                mapped++;
+                if (!m.phone || !m.date) missing++;
+              }
+              if (missing > 0) return `${missing} of ${mapped} mappings need attention`;
+              return `${mapped} source${mapped === 1 ? '' : 's'} mapped`;
+            })()}
+          />
+          {stepOpen[2] && (
+          <>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-start">
             {/* File A column — one card per A source. Dashboard slot first
                 if present, then each upload in load order. Each card maps to
@@ -1646,13 +1710,30 @@ export default function LeadAttributionPage() {
               })}
             </div>
           </div>
+          </>
+          )}
         </section>
       )}
 
       {/* ---- Step 3: Filters & rule ---- */}
       {fileA && fileB && (
         <section>
-          <h2 className="text-sm font-medium text-brand-navy mb-2">Step 3 — Filters &amp; rule</h2>
+          <StepHeader
+            n={3}
+            title="Filters & rule"
+            open={stepOpen[3]}
+            onToggle={() => toggleStep(3)}
+            summary={(() => {
+              const parts: string[] = [];
+              parts.push(rule === 'b_after_a' ? 'B after A' : 'any time');
+              parts.push(`same-day ${countSameDay ? 'on' : 'off'}`);
+              const fCount = filtersA.length + filtersB.length;
+              if (fCount > 0) parts.push(`${fCount} filter${fCount === 1 ? '' : 's'}`);
+              return parts.join(' · ');
+            })()}
+          />
+          {stepOpen[3] && (
+          <>
 
           <div className="card p-3 mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs">
             <span className="text-[10px] uppercase tracking-wider text-surface-500">Rule</span>
@@ -1734,6 +1815,8 @@ export default function LeadAttributionPage() {
               </button>
             </div>
           </div>
+          </>
+          )}
         </section>
       )}
 
@@ -2724,61 +2807,30 @@ function ResultsBlock({
         />
       </div>
 
-      {/* Funnel + Attributed revenue side-by-side. They share the same scope
-          (Step 4 — top-line summary) and have similar widths, so packing
-          them into one row saves a lot of vertical space without losing
-          readability. Falls back to stacked on narrow viewports. */}
-      <div className={`grid grid-cols-1 ${(hasAmount || hasPaid) ? 'md:grid-cols-2' : ''} gap-3`}>
-        <div className="card overflow-hidden">
-          <table className="w-full text-sm">
-            <tbody>
-              <FunnelRow label="Total leads in File A" count={totalA} total={totalA} bold />
-              <FunnelRow label="Phone exists in File B (ever)" count={keyMatched} total={totalA} indent={1} />
-              <FunnelRow label="B before A — pre-existing customers" count={preExisting} total={totalA} indent={2} chip="amber" chipLabel="Pre-existing" />
-              <FunnelRow label="B after A — attributed" count={attributed} total={totalA} indent={2} chip="green" chipLabel="Attributed" emphasize />
-              <FunnelRow label="No match in File B" count={unmatched} total={totalA} indent={1} muted />
-            </tbody>
-          </table>
-        </div>
-
-        {(hasAmount || hasPaid) && (
-          <div className="card p-3">
-            <div className="text-[11px] uppercase tracking-wider text-surface-500 mb-2">Attributed revenue</div>
-            <div className="grid grid-cols-1 gap-3 text-sm">
-              {hasAmount && (
-                <div>
-                  <div className="text-xs text-surface-500">Total amount (sum of {mappingB.amount})</div>
-                  <div className="text-lg font-semibold text-brand-navy">{fmtINR(revenueTotal)}</div>
-                  <div className="text-[10px] text-surface-400 mt-1">Includes future EMI installments. Optimistic.</div>
-                </div>
-              )}
-              {hasPaid && (
-                <div>
-                  <div className="text-xs text-surface-500">Paid amount (sum of {mappingB.amountPaid})</div>
-                  <div className="text-lg font-semibold text-brand-navy">{fmtINR(revenuePaid)}</div>
-                  <div className="text-[10px] text-surface-400 mt-1">Only first-installment receipts. Conservative.</div>
-                </div>
-              )}
-            </div>
-            {hasAmount && hasPaid && revenueTotal > 0 && (
-              <div className="text-[11px] text-surface-500 mt-2 pt-2 border-t border-surface-100">
-                Realized so far: <strong className="text-brand-navy">{((revenuePaid / revenueTotal) * 100).toFixed(0)}%</strong>{' '}
-                · Remaining EMI exposure: <strong className="text-brand-navy">{fmtINR(revenueTotal - revenuePaid)}</strong>
-              </div>
-            )}
-          </div>
-        )}
+      {/* Funnel breakdown — full width. The previous "Attributed revenue"
+          companion card was removed because it duplicated the Revenue (total)
+          and Revenue (paid) KPI cards above; the new Breakdown drill-down
+          gives the deeper per-source detail when needed. */}
+      <div className="card overflow-hidden">
+        <table className="w-full text-sm">
+          <tbody>
+            <FunnelRow label="Total leads in File A" count={totalA} total={totalA} bold />
+            <FunnelRow label="Phone exists in File B (ever)" count={keyMatched} total={totalA} indent={1} />
+            <FunnelRow label="B before A — pre-existing customers" count={preExisting} total={totalA} indent={2} chip="amber" chipLabel="Pre-existing" />
+            <FunnelRow label="B after A — attributed" count={attributed} total={totalA} indent={2} chip="green" chipLabel="Attributed" emphasize />
+            <FunnelRow label="No match in File B" count={unmatched} total={totalA} indent={1} muted />
+          </tbody>
+        </table>
       </div>
 
       {/* Product pivot — only renders when any B source has Product mapped.
           Aggregates attributed matches by product name (read from each pair's
           own bMapping, so different B files can use different product column
           names). Sortable by clicking any column header. */}
-      <ProductPivot pairs={results.attributedPairs} bExtras={bExtras} />
-
-      {/* Source pivot — only renders when 2+ sources exist on either side.
-          Shows which A file converted what and which B file accounted for
-          what revenue. Useful for multi-file workflows. */}
+      {/* Source pivot UP — "By File A source (where leads came from)". Top
+          slot because source is the higher-level pivot (leads originate
+          there); product is a downstream cut. Only renders when 2+ sources
+          exist on either side. */}
       <SourcePivot
         pairs={results.attributedPairs}
         aSourceCount={aSourceCount}
@@ -2786,6 +2838,12 @@ function ResultsBlock({
         aSourceTotals={results.aSourceTotals}
         bSourceTotals={results.bSourceTotals}
       />
+
+      {/* Product pivot DOWN — moved below source per the new layout. Aggregates
+          attributed matches by product name (read from each pair's own bMapping,
+          so different B files can use different product column names).
+          Sortable by clicking any column header. */}
+      <ProductPivot pairs={results.attributedPairs} bExtras={bExtras} />
 
       {/* Duplicate phones — warn the user if their A sources share leads.
           The algorithm uses the first occurrence by phone, so duplicates are
@@ -3221,6 +3279,46 @@ const METRIC_LABELS: Record<string, string> = {
   revenue: 'Revenue',
 };
 
+// Step header — single line "Step N — Title" with a summary pill on the
+// right and a chevron that flips on open/close. Replaces the old plain
+// <h2> step titles so each step can collapse after the first successful
+// attribution run (driven by stepOpen state in the parent component).
+function StepHeader({
+  n, title, summary, open, onToggle,
+}: {
+  n: 1 | 2 | 3;
+  title: string;
+  summary?: string;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="w-full flex items-center justify-between gap-3 mb-2 group text-left"
+    >
+      <div className="flex items-center gap-2 min-w-0">
+        {open
+          ? <ChevronDown size={14} className="text-surface-500 shrink-0" />
+          : <ChevronRight size={14} className="text-surface-500 shrink-0" />}
+        <h2 className="text-sm font-medium text-brand-navy">
+          Step {n} — {title}
+        </h2>
+        {!open && summary && (
+          <span className="text-[11px] text-surface-500 truncate ml-1" title={summary}>
+            · {summary}
+          </span>
+        )}
+      </div>
+      <span className="text-[10px] uppercase tracking-wider text-surface-400 shrink-0">
+        {open ? 'tap to collapse' : 'tap to edit'}
+      </span>
+    </button>
+  );
+}
+
 // Generic collapsible card. Default closed so the visualizations section
 // doesn't push the rest of the page down until the user opts in.
 function CollapsibleCard({
@@ -3275,18 +3373,18 @@ type MetricDef = {
 // checkboxes. Replaces the old SourceShareChart — now generalized so it
 // works for both "by source" (3 metrics) and "by product" (2 metrics).
 function MultiDonutChart({
-  rows, metrics, sourceWord = 'Sources',
+  rows, metrics, sourceWord = 'Sources', title,
 }: {
   rows: DonutRow[];
   metrics: MetricDef[];
-  sourceWord?: string;  // 'Sources' or 'Products' — used in legend header
+  sourceWord?: string;  // 'Sources' or 'Products'
+  // Optional section header rendered above this chart. Lets us pack multiple
+  // MultiDonutCharts into one parent card and still tell them apart.
+  title?: string;
 }) {
   // Disabled rows (hidden from donuts and percentage computation).
   const [disabled, setDisabled] = useState<Set<string>>(new Set());
-  // Hovered row, used to dim other slices for visual emphasis.
-  const [hoverLabel, setHoverLabel] = useState<string | null>(null);
-  // Active metrics — defaults to all enabled. The user toggles checkboxes
-  // above the donuts to hide/show metric donuts.
+  // Active metrics — toggleable via checkboxes above the donuts.
   const [activeMetrics, setActiveMetrics] = useState<Set<string>>(
     () => new Set(metrics.map(m => m.key))
   );
@@ -3303,7 +3401,7 @@ function MultiDonutChart({
   const visibleMetrics = metrics.filter(m => activeMetrics.has(m.key));
 
   // Per-metric totals across visible rows — used as the denominator for
-  // % share displayed in tooltips and the legend.
+  // % share displayed in tooltips and the legend dropdown.
   const totals = useMemo(() => {
     const t: Record<string, number> = {};
     for (const m of metrics) t[m.key] = visibleRows.reduce((s, r) => s + (r.values[m.key] ?? 0), 0);
@@ -3325,7 +3423,6 @@ function MultiDonutChart({
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
-      // Refuse to disable every metric.
       if (next.size === 0) return prev;
       return next;
     });
@@ -3359,8 +3456,18 @@ function MultiDonutChart({
     );
   }
 
+  const visibleCount = rows.length - disabled.size;
+
   return (
     <div className="space-y-3">
+      {/* Section header — distinguishes nested MultiDonutCharts within a
+          single parent card (e.g. "By source" vs "By product"). */}
+      {title && (
+        <div className="text-[11px] uppercase tracking-wider text-surface-700 font-medium border-b border-surface-100 pb-1.5">
+          {title}
+        </div>
+      )}
+
       {/* Metric checkboxes — control which donuts are visible. */}
       <div className="flex flex-wrap items-center gap-3 text-[11px]">
         <span className="text-surface-500 uppercase tracking-wider">Show:</span>
@@ -3393,7 +3500,9 @@ function MultiDonutChart({
         })}
       </div>
 
-      {/* Donut grid — one column per active metric. Auto-balances width. */}
+      {/* Donut grid — one column per active metric. No hover-dimming; slices
+          stay full-color always (the recharts tooltip still appears on slice
+          hover). */}
       <div
         className="grid gap-3"
         style={{ gridTemplateColumns: `repeat(${Math.max(1, visibleMetrics.length)}, minmax(0, 1fr))` }}
@@ -3403,7 +3512,6 @@ function MultiDonutChart({
             key={m.key}
             data={visibleRows.map(r => ({ name: r.label, value: r.values[m.key] ?? 0 }))}
             colorMap={colorMap}
-            hoverLabel={hoverLabel}
             label={m.label}
             total={totals[m.key]}
             formatTotal={m.format}
@@ -3412,14 +3520,23 @@ function MultiDonutChart({
         ))}
       </div>
 
-      {/* Interactive legend — click toggles a row off/on; hover highlights it
-          across all donuts. Each legend item also shows its share for every
-          active metric, so the legend doubles as a comparison table. */}
-      <div className="pt-3 border-t border-surface-100">
-        <div className="text-[10px] uppercase tracking-wider text-surface-500 mb-2">
-          {sourceWord} — click to toggle, hover to highlight
-        </div>
-        <div className="space-y-1">
+      {/* Legend — dropdown disclosure (was a long inline list before). The
+          summary shows count + total; the open panel has a checkbox per row
+          with per-metric % shares. Uses native <details> for accessibility
+          and zero JS state for the open/close. */}
+      <details className="border-t border-surface-100 pt-2 group">
+        <summary className="list-none cursor-pointer flex items-center justify-between gap-2 px-1 py-1.5 rounded hover:bg-surface-50">
+          <span className="text-[11px] text-surface-700">
+            <span className="uppercase tracking-wider text-surface-500">{sourceWord}:</span>{' '}
+            <span className="font-medium">{visibleCount}</span>
+            <span className="text-surface-400"> of {rows.length} visible</span>
+          </span>
+          <span className="text-[10px] text-surface-400 flex items-center gap-1">
+            <span className="group-open:hidden">Tap to filter ▾</span>
+            <span className="hidden group-open:inline">Tap to close ▴</span>
+          </span>
+        </summary>
+        <div className="mt-2 space-y-0.5 max-h-72 overflow-y-auto pr-1">
           {rows.map(r => {
             const off = disabled.has(r.label);
             const color = colorMap[r.label];
@@ -3428,8 +3545,6 @@ function MultiDonutChart({
                 key={r.label}
                 type="button"
                 onClick={() => toggleRow(r.label)}
-                onMouseEnter={() => setHoverLabel(r.label)}
-                onMouseLeave={() => setHoverLabel(null)}
                 className={`w-full flex items-center gap-2 px-2 py-1.5 rounded transition-colors text-left ${
                   off ? 'opacity-40 hover:opacity-60' : 'hover:bg-surface-50'
                 }`}
@@ -3446,7 +3561,6 @@ function MultiDonutChart({
                 <span className="flex-1 text-xs text-surface-700 truncate" title={r.label}>
                   {r.label}
                 </span>
-                {/* Per-metric share inline — shown only for active metrics. */}
                 <span className="flex items-center gap-3 text-[11px] tabular-nums">
                   {visibleMetrics.map(m => {
                     const v = r.values[m.key] ?? 0;
@@ -3463,21 +3577,18 @@ function MultiDonutChart({
             );
           })}
         </div>
-      </div>
+      </details>
     </div>
   );
 }
 
 function DonutColumn({
-  data, colorMap, hoverLabel, label, total, formatTotal, tooltip,
+  data, colorMap, label, total, formatTotal, tooltip,
 }: {
   data: Array<{ name: string; value: number }>;
   colorMap: Record<string, string>;
-  hoverLabel: string | null;
   label: string;
   total: number;
-  // Custom formatter for the center "Total" number — fmtInt for counts,
-  // fmtINR for revenue donuts.
   formatTotal: (n: number) => string;
   tooltip: React.ComponentType<{ active?: boolean; payload?: Array<{ name: string; value: number }> }>;
 }) {
@@ -3510,7 +3621,6 @@ function DonutColumn({
                   <Cell
                     key={d.name}
                     fill={colorMap[d.name] ?? '#CBD0D9'}
-                    fillOpacity={hoverLabel == null || hoverLabel === d.name ? 1 : 0.25}
                   />
                 ))}
               </Pie>
@@ -3795,31 +3905,41 @@ function Visualizations({
       <div className="text-[11px] uppercase tracking-wider text-surface-500 px-1">
         Visualizations
       </div>
-      {/* Source + Product cards drop into a 2-col grid (half the vertical
-          space of the old stacked layout). Trend over time stays full-width
-          below because line charts need horizontal room to read. */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <CollapsibleCard
-          title="Share by source"
-          subtitle="Donuts showing % share of leads, customers, and revenue by File A source. Click any source in the legend to exclude it."
-        >
-          <MultiDonutChart rows={sourceRows} metrics={sourceMetrics} sourceWord="Sources" />
-        </CollapsibleCard>
-        <CollapsibleCard
-          title="Share by product"
-          subtitle={hasProductMapping
-            ? 'Customers and revenue split by product (read from each B file\'s Product column).'
-            : 'Add a "Product" mapping on any File B card to enable this view.'}
-        >
+      {/* Source + Product live inside ONE collapsible card now (was two
+          separate cards). One tap expands/collapses both views together;
+          inside the card each gets its own bold section header so they're
+          still visually distinct. Trend over time stays in its own card
+          below since the line chart wants its own space. */}
+      <CollapsibleCard
+        title="Share by source & product"
+        subtitle="Donuts for % share of leads, customers, and revenue — pivoted both by File A source AND by B-side product. Use the dropdowns to filter."
+      >
+        <div className="space-y-5">
+          <MultiDonutChart
+            rows={sourceRows}
+            metrics={sourceMetrics}
+            sourceWord="Sources"
+            title="By source"
+          />
           {hasProductMapping ? (
-            <MultiDonutChart rows={productRows} metrics={productMetrics} sourceWord="Products" />
+            <MultiDonutChart
+              rows={productRows}
+              metrics={productMetrics}
+              sourceWord="Products"
+              title="By product"
+            />
           ) : (
-            <div className="text-[12px] text-surface-400 py-6 text-center">
-              No product mapping detected on any File B source.
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-surface-700 font-medium border-b border-surface-100 pb-1.5 mb-2">
+                By product
+              </div>
+              <div className="text-[12px] text-surface-400 py-4 text-center">
+                Add a <code className="font-mono">Product</code> mapping on any File B card to enable this view.
+              </div>
             </div>
           )}
-        </CollapsibleCard>
-      </div>
+        </div>
+      </CollapsibleCard>
       <CollapsibleCard
         title="Trend over time"
         subtitle="Daily counts of leads created (File A), customers attributed, and revenue — plotted by the lead-creation date (cohort view)."
