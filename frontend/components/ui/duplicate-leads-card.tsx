@@ -71,7 +71,11 @@ export default function DuplicateLeadsCard({ count, rows, dialAttempts, campaign
           <p className="text-xs text-surface-600 mb-3">
             Phones dialed in <strong>{avgKDisplay}</strong> campaigns on average. Same
             person, multiple uploads — usually a re-upload of an old lead list. Consumes
-            extra dials without expanding reach.
+            extra dials without expanding reach.{' '}
+            <span className="text-surface-500">
+              Leads whose only prior touch was a <strong>CANCELLED</strong> call are
+              treated as legitimate retries and excluded from this count.
+            </span>
           </p>
 
           <div className="grid grid-cols-3 gap-3">
