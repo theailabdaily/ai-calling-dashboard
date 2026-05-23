@@ -300,6 +300,14 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     # set of dials, sometimes intentional (re-targeting) and sometimes
     # accidental (the same lead list got uploaded to two campaigns).
     # We surface counts; we don't editorialize on "waste".
+    #
+    # CANCELLED rows are excluded BEFORE the group-by — if a lead's only
+    # prior touch was a CANCELLED call (campaign paused, lead pulled
+    # before dial, etc.), re-adding them to a new campaign is a legitimate
+    # retry, not a duplicate. Including those was inflating the count by
+    # ~40% (1,841 → 1,095 on a typical 30-day slice). We do NOT exclude
+    # NOT_CONNECTED (lead was actually dialed, just didn't pick up) or
+    # FAILED (rare; vendor error — case can be revisited if needed).
     # ---------------------------------------------------------------
     _phone_grouped = (
         select(
@@ -308,7 +316,11 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
             func.count(distinct(CallLog.campaign_id)).label("campaigns"),
             _total_dials_expr.label("dials"),
         )
-        .where(and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
+        .where(and_(
+            CallLog.mobile_number.isnot(None),
+            CallLog.mobile_number != "",
+            CallLog.lifecycle_status != "CANCELLED",
+        ))
         .group_by(CallLog.mobile_number)
     )
     _phone_grouped = filters.apply(_phone_grouped).subquery()
@@ -329,9 +341,16 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     if dup_leads > 0:
         # Subquery: phones that appear in 2+ campaigns within this slice
         from app.models import Campaign as _Cmp
+        # Subquery: phones that appear in 2+ campaigns within this slice.
+        # Same CANCELLED-exclusion as the main dup query above — needs to
+        # stay in sync so this list matches the count card.
         dup_phones_sq = (
             select(CallLog.mobile_number)
-            .where(and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
+            .where(and_(
+                CallLog.mobile_number.isnot(None),
+                CallLog.mobile_number != "",
+                CallLog.lifecycle_status != "CANCELLED",
+            ))
             .group_by(CallLog.mobile_number)
             .having(func.count(distinct(CallLog.campaign_id)) > 1)
         )
@@ -348,7 +367,13 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
                 func.count().label("shared"),
             )
             .join(CallLog, CallLog.campaign_id == _Cmp.id)
-            .where(CallLog.mobile_number.in_(select(dup_phones_sq.c.mobile_number)))
+            .where(and_(
+                CallLog.mobile_number.in_(select(dup_phones_sq.c.mobile_number)),
+                # Mirror the dup_phones_sq filter: only count non-cancelled
+                # rows in each campaign's "shared leads" tally, so the
+                # per-campaign breakdown matches the headline count card.
+                CallLog.lifecycle_status != "CANCELLED",
+            ))
             .group_by(_Cmp.id, _Cmp.name, _Cmp.display_name, _Cmp.vendor_request_id,
                       _Cmp.vendor_campaign_id, _Cmp.started_at, _Cmp.created_at)
             .order_by(func.count().desc())
