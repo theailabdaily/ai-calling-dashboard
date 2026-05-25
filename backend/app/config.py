@@ -16,9 +16,14 @@ class Settings(BaseSettings):
     # DB
     database_url: str = Field(..., description="postgresql+asyncpg://...")
 
-    # Hunar
+    # Hunar — UGC NET bot (original account)
     hunar_api_key: str | None = None
     hunar_base_url: str = "https://api.voice.hunar.ai/external/v1"
+
+    # Hunar — UPSC bot (separate Hunar org / API key)
+    # Syncs under vendor slug "hunar-upsc" so its calls never mix with UGC NET.
+    hunar_upsc_api_key: str | None = None
+    hunar_upsc_base_url: str = "https://api.voice.hunar.ai/external/v1"
 
     # SquadStack (placeholder — fill in when integrating)
     squadstack_api_key: str | None = None
