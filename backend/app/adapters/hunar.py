@@ -64,14 +64,30 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 
 class HunarAdapter(VendorAdapter):
+    # Default slug/display_name for the original UGC NET account.
+    # Override via constructor when instantiating the UPSC adapter
+    # so both instances write to their own vendor row in the DB.
     slug = "hunar"
     display_name = "Hunar"
 
-    def __init__(self, api_key: str, base_url: str = "https://api.voice.hunar.ai/external/v1") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = "https://api.voice.hunar.ai/external/v1",
+        slug: str | None = None,
+        display_name: str | None = None,
+    ) -> None:
         if not api_key:
-            raise ValueError("HUNAR_API_KEY is required")
+            raise ValueError("api_key is required")
         self.base_url = base_url.rstrip("/")
         self._headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+        # Allow caller to override class-level slug/display_name so a second
+        # Hunar account ("hunar-upsc") syncs to its own vendor row without
+        # needing a separate subclass.
+        if slug:
+            self.slug = slug
+        if display_name:
+            self.display_name = display_name
 
     # -----------------------------------------------------------------
     # HTTP helper
