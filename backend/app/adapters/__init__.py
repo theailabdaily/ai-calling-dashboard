@@ -14,6 +14,15 @@ def get_adapter(slug: str) -> VendorAdapter:
         if not s.hunar_api_key:
             raise RuntimeError("HUNAR_API_KEY not configured")
         return HunarAdapter(api_key=s.hunar_api_key, base_url=s.hunar_base_url)
+    if slug == "hunar-upsc":
+        if not s.hunar_upsc_api_key:
+            raise RuntimeError("HUNAR_UPSC_API_KEY not configured")
+        return HunarAdapter(
+            api_key=s.hunar_upsc_api_key,
+            base_url=s.hunar_upsc_base_url,
+            slug="hunar-upsc",
+            display_name="Hunar (UPSC)",
+        )
     if slug == "squadstack":
         return SquadStackAdapter(api_key=s.squadstack_api_key, base_url=s.squadstack_base_url)
     raise ValueError(f"Unknown vendor slug: {slug}")
@@ -25,6 +34,16 @@ def all_active_adapters() -> list[VendorAdapter]:
     out: list[VendorAdapter] = []
     if s.hunar_api_key:
         out.append(HunarAdapter(api_key=s.hunar_api_key, base_url=s.hunar_base_url))
+    if s.hunar_upsc_api_key:
+        # Second Hunar adapter for the UPSC bot — separate org, separate API key,
+        # syncs under slug "hunar-upsc" so its vendor row and call_logs never
+        # mix with the UGC NET data.
+        out.append(HunarAdapter(
+            api_key=s.hunar_upsc_api_key,
+            base_url=s.hunar_upsc_base_url,
+            slug="hunar-upsc",
+            display_name="Hunar (UPSC)",
+        ))
     if s.squadstack_api_key:
         out.append(SquadStackAdapter(api_key=s.squadstack_api_key, base_url=s.squadstack_base_url))
     return out
