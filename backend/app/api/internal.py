@@ -36,6 +36,24 @@ def _verify_auth_log_secret(x_auth_log_secret: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid or missing X-Auth-Log-Secret")
 
 
+@router.get("/config-check")
+async def config_check(x_cron_secret: str | None = Header(default=None)):
+    """Returns which API keys are configured (bool only — no values exposed).
+    Useful for diagnosing silent adapter-skip issues without leaking secrets."""
+    _verify_secret(x_cron_secret)
+    s = get_settings()
+    from app.adapters import all_active_adapters
+    adapters = all_active_adapters()
+    return {
+        "keys_set": {
+            "HUNAR_API_KEY":      bool(s.hunar_api_key),
+            "HUNAR_UPSC_API_KEY": bool(s.hunar_upsc_api_key),
+            "SQUADSTACK_API_KEY": bool(s.squadstack_api_key),
+        },
+        "active_adapter_slugs": [a.slug for a in adapters],
+    }
+
+
 @router.get("/health")
 async def internal_health(x_cron_secret: str | None = Header(default=None)):
     _verify_secret(x_cron_secret)
