@@ -1,10 +1,14 @@
 """Adapter registry. Look up by vendor slug."""
 from __future__ import annotations
 
+import logging
+
 from app.adapters.base import VendorAdapter
 from app.adapters.hunar import HunarAdapter
 from app.adapters.squadstack import SquadStackAdapter
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def get_adapter(slug: str) -> VendorAdapter:
@@ -34,16 +38,24 @@ def all_active_adapters() -> list[VendorAdapter]:
     out: list[VendorAdapter] = []
     if s.hunar_api_key:
         out.append(HunarAdapter(api_key=s.hunar_api_key, base_url=s.hunar_base_url))
+        logger.info("adapter active: hunar (UGC NET)")
+    else:
+        logger.warning("adapter SKIPPED: hunar -- HUNAR_API_KEY not set")
+
     if s.hunar_upsc_api_key:
-        # Second Hunar adapter for the UPSC bot — separate org, separate API key,
-        # syncs under slug "hunar-upsc" so its vendor row and call_logs never
-        # mix with the UGC NET data.
         out.append(HunarAdapter(
             api_key=s.hunar_upsc_api_key,
             base_url=s.hunar_upsc_base_url,
             slug="hunar-upsc",
             display_name="Hunar (UPSC)",
         ))
+        logger.info("adapter active: hunar-upsc (UPSC)")
+    else:
+        logger.warning("adapter SKIPPED: hunar-upsc -- HUNAR_UPSC_API_KEY not set or empty")
+
     if s.squadstack_api_key:
         out.append(SquadStackAdapter(api_key=s.squadstack_api_key, base_url=s.squadstack_base_url))
+        logger.info("adapter active: squadstack")
+
+    logger.info("total active adapters: %d", len(out))
     return out
