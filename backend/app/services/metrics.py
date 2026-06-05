@@ -187,9 +187,11 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     _intr_phone     = case((and_(_is_connected, _is_interested), _valid_phone))
     _cb_phone       = case((and_(_is_connected, _has_follow_up), _valid_phone))
     _topprio_phone  = case((and_(_is_connected, _is_interested, _has_follow_up), _valid_phone))
-    # Mutually-exclusive sales-action buckets — sliced from Connected so each
-    # connected lead lands in exactly one bucket. Sum equals connected_calls.
-    # Drives the "Sales action breakdown" cards under the funnel.
+    # LEGACY row-level bucket expressions. NOTE: distinct-phone counts over these
+    # do NOT partition connected leads (a lead with mixed-signal retries counts in
+    # two buckets) and are NO LONGER used by the Sales-action cards — those are now
+    # computed lead-level in the _bucket_stmt block below. Kept only so the labels
+    # remain available; safe to drop in a later cleanup.
     _intr_only_phone = case((and_(_is_connected, _is_interested,         ~_has_follow_up), _valid_phone))
     _cb_only_phone   = case((and_(_is_connected, ~_is_interested,         _has_follow_up), _valid_phone))
     _no_intent_phone = case((and_(_is_connected, ~_is_interested,        ~_has_follow_up), _valid_phone))
@@ -277,15 +279,48 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     unique_engaged = int(row.unique_engaged_leads or 0)
     unique_interested = int(row.unique_interested_leads or 0)
     unique_callback = int(row.unique_callback_leads or 0)
-    unique_top_priority = int(row.unique_top_priority_leads or 0)
-    # The 4 mutually-exclusive sales-action buckets, all from SQL directly
-    # (not inclusion-exclusion arithmetic). Each connected lead lands in
-    # EXACTLY one. Sum equals unique_connected modulo 2 unclassified leads
-    # whose interest_level is NULL — those fall into no_intent. So the four
-    # buckets together strictly equal unique_connected.
-    unique_interested_only = int(row.unique_interested_only_leads or 0)
-    unique_callback_only   = int(row.unique_callback_only_leads_q or 0)
-    unique_no_intent       = int(row.unique_no_intent_leads or 0)
+    # --- Sales-action buckets: assign each connected LEAD to exactly one bucket ---
+    # The four cards (Top priority / Interested only / Callback only / No intent)
+    # MUST partition unique_connected — each connected lead in exactly one bucket,
+    # sum == unique_connected, zero overlap.
+    #
+    # The old approach computed COUNT(DISTINCT phone) over ROW-level signal
+    # conditions (see _intr_only_phone etc. above). That is wrong for any lead
+    # dialed more than once: a lead can have one retry tagged "interested" and a
+    # different retry tagged "callback", so the SAME phone was counted in two
+    # buckets. The four distinct-phone counts then summed to MORE than connected
+    # (UGC NET: 8,308 vs 8,095; UPSC: 1,386 vs 1,384) and the "mutually exclusive"
+    # promise on the cards was broken.
+    #
+    # Fix: aggregate each lead's signals across ALL its connected calls (bool_or),
+    # then bucket once. interested := interested on ANY connected call; follow_up
+    # := follow-up on ANY connected call. The four (interested, follow_up) combos
+    # partition the lead set, so the cards sum to unique_connected exactly. This
+    # is workspace-agnostic — _is_interested / _has_follow_up already coalesce
+    # both UGC NET and UPSC result-field schemes, with no cross-contamination.
+    _lead_sub = (
+        select(
+            CallLog.mobile_number.label("phone"),
+            func.bool_or(_is_interested).label("any_interested"),
+            func.bool_or(_has_follow_up).label("any_follow_up"),
+        )
+        .where(and_(_is_connected, CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
+        .group_by(CallLog.mobile_number)
+    )
+    _lead_sub = filters.apply(_lead_sub).subquery()
+    _ai = _lead_sub.c.any_interested
+    _af = _lead_sub.c.any_follow_up
+    _bucket_stmt = select(
+        func.count().filter(and_(_ai, _af)).label("top_priority"),        # interested AND follow-up
+        func.count().filter(and_(_ai, ~_af)).label("interested_only"),    # interested, no follow-up
+        func.count().filter(and_(~_ai, _af)).label("callback_only"),      # follow-up, not interested
+        func.count().filter(and_(~_ai, ~_af)).label("no_intent"),         # neither
+    ).select_from(_lead_sub)
+    _brow = (await db.execute(_bucket_stmt)).one()
+    unique_top_priority    = int(_brow.top_priority or 0)
+    unique_interested_only = int(_brow.interested_only or 0)
+    unique_callback_only   = int(_brow.callback_only or 0)
+    unique_no_intent       = int(_brow.no_intent or 0)
     connected = int(row.connected_calls or 0)
     failed = int(row.failed_calls or 0)
     engaged = int(row.engaged_calls or 0)
