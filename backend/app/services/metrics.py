@@ -123,18 +123,16 @@ _is_engaged = CallLog.engagement_status == "ENGAGED"
 #   UGC NET → interest_level (HIGH/MEDIUM) + next_step_interest (CALLBACK)
 #   UPSC    → upsc_interest_status (serious/exploratory) + call_outcome (counsellor_scheduled/callback_requested)
 #
-# Both branches are OR-ed so the same expressions work across all product lines.
+# COALESCE wraps each branch so that NULL (absent field) becomes FALSE — critical for
+# the ~_is_interested / ~_has_follow_up negations in no_intent / callback_only / interested_only
+# buckets. Without it: NOT(NULL) = NULL, and calls with unpopulated results fall into nothing.
 _is_interested = or_(
-    # UGC NET
-    func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
-    # UPSC
-    func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]),
+    func.coalesce(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]), False),
+    func.coalesce(func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]), False),
 )
 _has_follow_up = or_(
-    # UGC NET
-    func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
-    # UPSC — counsellor_scheduled already implies both interest AND a scheduled call
-    func.upper(CallLog.result["call_outcome"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]),
+    func.coalesce(func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK", False),
+    func.coalesce(func.upper(CallLog.result["call_outcome"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]), False),
 )
 # Hot lead = either signal of buying intent. Drives the bottom funnel stage
 # and the "Hot leads" tile.
