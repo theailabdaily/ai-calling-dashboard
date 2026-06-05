@@ -118,8 +118,24 @@ _is_engaged = CallLog.engagement_status == "ENGAGED"
 # JSONB key check — Hunar uses qualitative levels.
 # interest_level: HIGH | MEDIUM | LOW | "Not Covered" | "NOT AVAILABLE"
 # next_step_interest: CALLBACK | NONE | UNSURE | "Not Covered" | "NOT AVAILABLE"
-_is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
-_has_follow_up = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
+#
+# UPSC agents use different result field names than UGC NET agents:
+#   UGC NET → interest_level (HIGH/MEDIUM) + next_step_interest (CALLBACK)
+#   UPSC    → upsc_interest_status (serious/exploratory) + call_outcome (counsellor_scheduled/callback_requested)
+#
+# Both branches are OR-ed so the same expressions work across all product lines.
+_is_interested = or_(
+    # UGC NET
+    func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+    # UPSC
+    func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]),
+)
+_has_follow_up = or_(
+    # UGC NET
+    func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+    # UPSC — counsellor_scheduled already implies both interest AND a scheduled call
+    func.upper(CallLog.result["call_outcome"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]),
+)
 # Hot lead = either signal of buying intent. Drives the bottom funnel stage
 # and the "Hot leads" tile.
 #
@@ -180,12 +196,22 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     _cb_only_phone   = case((and_(_is_connected, ~_is_interested,         _has_follow_up), _valid_phone))
     _no_intent_phone = case((and_(_is_connected, ~_is_interested,        ~_has_follow_up), _valid_phone))
 
-    # Connected breakdown by interest_level (mutually exclusive — uses the
-    # row's interest_level, not "best across attempts". For the connected
-    # row itself, this is fine — a connected phone has at most a few rows
-    # and they're usually consistent. The sum across buckets equals
-    # connected_calls (row count), which lets the stacked bar chart be honest.
-    _il = func.upper(CallLog.result["interest_level"].astext)
+    # Connected breakdown by interest level — normalises both UGC NET
+    # (interest_level) and UPSC (upsc_interest_status) field names into a
+    # single coalesced string so the stacked bar chart works for both.
+    _il = func.upper(func.coalesce(
+        func.nullif(CallLog.result["interest_level"].astext, ""),
+        # UPSC mapping: serious→HIGH, exploratory→MEDIUM, casual→LOW,
+        # not_interested/dropped→NOT COVERED, rest→NOT AVAILABLE
+        case(
+            (func.upper(CallLog.result["upsc_interest_status"].astext) == "SERIOUS", "HIGH"),
+            (func.upper(CallLog.result["upsc_interest_status"].astext) == "EXPLORATORY", "MEDIUM"),
+            (func.upper(CallLog.result["upsc_interest_status"].astext) == "CASUAL", "LOW"),
+            (func.upper(CallLog.result["upsc_interest_status"].astext).in_(
+                ["NOT INTERESTED", "NOT_INTERESTED", "DROPPED"]), "NOT COVERED"),
+            else_="NOT AVAILABLE",
+        ),
+    ))
     _conn_high          = and_(_is_connected, _il == "HIGH")
     _conn_medium        = and_(_is_connected, _il == "MEDIUM")
     _conn_low           = and_(_is_connected, _il == "LOW")
