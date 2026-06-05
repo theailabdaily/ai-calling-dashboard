@@ -2,10 +2,9 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { usePathname } from 'next/navigation';
-import { useSession, signOut } from 'next-auth/react';
 import {
   LayoutDashboard, Users, Phone, Bot, Send, Clock, RefreshCw,
-  ScrollText, CalendarDays, Search, Shuffle, LogOut, Shield,
+  ScrollText, CalendarDays, Search, Shuffle, Shield,
 } from 'lucide-react';
 import { cn } from '@/lib/api';
 import ProductLineSwitcher from './product-line-switcher';
@@ -30,8 +29,6 @@ const NAV = [
 // rendering this component entirely via the x-is-lookup-host header check.
 export default function Sidebar() {
   const pathname = usePathname();
-  const { data: session } = useSession();
-  const email = session?.user?.email;
 
   return (
     <aside className="hidden lg:flex w-60 shrink-0 bg-black text-white min-h-screen flex-col sticky top-0 h-screen">
@@ -92,31 +89,6 @@ export default function Sidebar() {
         <Shield size={13} strokeWidth={1.75} />
         Login activity
       </Link>
-
-      {/* User profile + sign out */}
-      {email && (
-        <div className="px-3 pt-2 pb-3 border-t border-white/10">
-          <div className="flex items-center gap-2 mb-2 px-1">
-            <div className="w-6 h-6 rounded-full bg-white/10 flex items-center justify-center text-[10px] font-semibold uppercase shrink-0">
-              {email.split('@')[0].slice(0, 2)}
-            </div>
-            <p
-              className="flex-1 text-[11px] text-white/75 truncate font-medium"
-              title={email}
-            >
-              {email}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => signOut({ callbackUrl: '/login' })}
-            className="w-full flex items-center justify-center gap-1.5 h-6 bg-white/[0.06] hover:bg-white/10 rounded text-[11px] text-white/70 hover:text-white transition-colors"
-          >
-            <LogOut size={10} strokeWidth={2} />
-            Sign out
-          </button>
-        </div>
-      )}
 
       {/* Footer — auto-refresh indicator */}
       <div className="px-3 py-2 border-t border-white/5 text-[9px] text-white/25 tracking-wide uppercase">
