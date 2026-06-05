@@ -51,10 +51,10 @@ const T = {
   engaged:        'Connected leads who had a real back-and-forth with the bot (engagement_status=ENGAGED on at least one attempt). Quality gate — tells you whether the bot got a fair listen, not whether the prospect was interested.',
   avgDur:         'Average length of connected calls only. Failed/voicemail/dropped calls excluded so it reflects real conversations.',
   // Sales action buckets — each connected lead lands in exactly one
-  topPriority:    'Connected AND tagged HIGH/MEDIUM interest AND asked for callback. The lowest-noise sales-actionable list. Call these first.',
-  interestedOnly: 'Tagged HIGH/MEDIUM interest BUT did NOT ask for a callback. Warm leads — sales should still chase, but priority below Top.',
-  callbackOnly:   'Asked for a callback BUT interest tagged LOW / NOT_COVERED / NOT_AVAILABLE. They want contact even though the bot didn\'t qualify them — give them a shot but don\'t expect the same hit-rate as Interested.',
-  noIntent:       'Connected, had the conversation, but no positive signal — said no, bot couldn\'t qualify, or call ended too short. Useful for QA: listen to a sample to see if the bot\'s pitch is the issue.',
+  topPriority:    'Connected AND showed strong interest AND requested a follow-up (callback or counsellor call). Lowest-noise, highest-signal list. Call these first. For UGC NET: HIGH/MEDIUM interest + CALLBACK. For UPSC: counsellor_scheduled or (serious/exploratory + callback_requested).',
+  interestedOnly: 'Showed strong interest BUT did NOT request a follow-up. Warm leads — BD should still chase, priority just below Top Priority. For UGC NET: HIGH/MEDIUM interest, no CALLBACK. For UPSC: serious/exploratory upsc_interest_status, no callback_requested.',
+  callbackOnly:   'Requested a follow-up BUT interest signal was low or unclear. They want contact even though the bot didn\'t fully qualify them — worth a shot but expect lower hit-rate vs Interested. For UGC NET: CALLBACK next_step but LOW/NOT_COVERED interest. For UPSC: callback_requested call_outcome with unclear interest.',
+  noIntent:       'Connected, had the conversation, but no positive signal — said no, bot couldn\'t qualify, or call ended too short. Useful for QA: listen to a sample to check if the bot\'s pitch or script is the issue.',
   unreached:      'Lead-attempts we did NOT connect with. Includes In Progress (still being retried — Hunar isn\'t done yet), Not Connected, Voicemail, and hard Failed.',
 };
 
@@ -152,7 +152,7 @@ export default function OverviewPage() {
           <MetricCard
             label="Top priority"
             value={m ? fmt.int(m.unique_top_priority_leads) : '—'}
-            hint="Interested AND Callback"
+            hint="Interested AND requested follow-up"
             tooltip={T.topPriority}
             href={buildCallsLink(filters, { funnel_stage: 'top_priority' })}
             accent
@@ -160,7 +160,7 @@ export default function OverviewPage() {
           <MetricCard
             label="Interested only"
             value={m ? fmt.int(m.unique_interested_only_leads) : '—'}
-            hint="HIGH/MEDIUM, no callback ask"
+            hint="Interested, no follow-up ask"
             tooltip={T.interestedOnly}
             href={buildCallsLink(filters, { funnel_stage: 'interested_only' })}
           />
