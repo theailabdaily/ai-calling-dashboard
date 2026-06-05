@@ -61,15 +61,46 @@ async def list_calls(
     if only_with_recording:
         extra.append(CallLog.recording_url.isnot(None))
     if only_interested:
-        extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
+        # UGC NET uses interest_level HIGH/MEDIUM; UPSC uses upsc_interest_status serious/exploratory
+        extra.append(or_(
+            func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+            func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]),
+        ))
     if failed_only:
         extra.append(CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")))
 
     # Funnel stage filter — for the "click on funnel stage" drill-down
     if funnel_stage:
         is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
-        is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
-        wants_callback = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
+        # Multi-vendor interest signal with NULL-safe coalesce so that
+        # ~is_interested is TRUE (not NULL) when both fields are absent.
+        # Without coalesce: NOT(NULL IN (...)) = NULL — "no intent" calls
+        # with unpopulated results would match nothing.
+        #   UGC NET → result.interest_level in (HIGH, MEDIUM)
+        #   UPSC    → result.upsc_interest_status in (SERIOUS, EXPLORATORY)
+        is_interested = or_(
+            func.coalesce(
+                func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+                False,
+            ),
+            func.coalesce(
+                func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]),
+                False,
+            ),
+        )
+        # Multi-vendor callback signal (same NULL-safe treatment):
+        #   UGC NET → result.next_step_interest == CALLBACK
+        #   UPSC    → result.call_outcome in (CALLBACK_REQUESTED, COUNSELLOR_SCHEDULED)
+        wants_callback = or_(
+            func.coalesce(
+                func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK",
+                False,
+            ),
+            func.coalesce(
+                func.upper(CallLog.result["call_outcome"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]),
+                False,
+            ),
+        )
 
         if funnel_stage == "leads":
             # Top-of-funnel — every lead-attempt in the slice. No filter.
@@ -139,9 +170,15 @@ async def list_calls(
     items = []
     for row in rows:
         c: CallLog = row[0]
-        # Hunar JSONB schema: interest_level (HIGH/MEDIUM/LOW) and follow_up_time
-        interested = c.result.get("interest_level") if isinstance(c.result, dict) else None
-        follow_up_raw = c.result.get("follow_up_time") if isinstance(c.result, dict) else None
+        result_dict = c.result if isinstance(c.result, dict) else {}
+        # Interest signal — UGC NET uses interest_level; UPSC uses upsc_interest_status
+        interested = result_dict.get("interest_level") or result_dict.get("upsc_interest_status")
+        # Follow-up signal — UGC NET uses follow_up_time; UPSC uses call_outcome
+        follow_up_raw = result_dict.get("follow_up_time")
+        if not follow_up_raw:
+            call_outcome = (result_dict.get("call_outcome") or "").upper()
+            if call_outcome in ("COUNSELLOR_SCHEDULED", "CALLBACK_REQUESTED"):
+                follow_up_raw = result_dict.get("call_outcome")  # show the UPSC outcome string
         # Hunar uses "NA" / "NOT AVAILABLE" / "Not Covered" as null sentinels — collapse those
         follow_up = follow_up_raw if follow_up_raw and follow_up_raw.upper() not in ("NA", "NOT AVAILABLE", "NOT COVERED") else None
         items.append(CallListItem(
