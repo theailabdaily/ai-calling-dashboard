@@ -76,17 +76,21 @@ async def get_vendor_by_slug(db: AsyncSession, slug: str) -> Vendor | None:
 # ---------------------------------------------------------------------------
 async def upsert_agent(db: AsyncSession, vendor_id: UUID, n: NormalizedAgent) -> UUID | None:
     """
-    Update existing agent rows with fresh data from vendor sync.
-    Does NOT create new agents — they must be pre-seeded with a product_line_id
-    via SQL before any of their calls can ingest. This is fail-closed.
+    Upsert agent rows from vendor sync.
+
+    For EXISTING agents (pre-seeded with a product_line_id): refresh their data
+    fields and return their DB id. These agents are "allowed" — their calls ingest.
+
+    For NEW agents (not yet in DB): INSERT them with product_line_id = NULL so
+    they are visible in the agents table. Calls from them are still blocked
+    (fail-closed) until someone assigns a product_line_id via SQL. This is a
+    change from the old behaviour (skip unknown agents entirely) — it lets us
+    discover agent UUIDs from new vendor accounts without manual pre-seeding.
+    The INFO log below makes the new agents easy to spot.
     """
-    if not await _is_allowed_agent(db, vendor_id, n.vendor_agent_id):
-        logger.debug(
-            "skipping agent (no product_line_id) vendor_agent_id=%s name=%s",
-            n.vendor_agent_id, n.name,
-        )
-        return None
-    # Agent row exists and is allowed — refresh its data fields.
+    allowed = await _is_allowed_agent(db, vendor_id, n.vendor_agent_id)
+
+    # Always upsert the agent row so new agents appear in the DB.
     stmt = pg_insert(Agent).values(
         vendor_id=vendor_id,
         vendor_agent_id=n.vendor_agent_id,
@@ -106,6 +110,17 @@ async def upsert_agent(db: AsyncSession, vendor_id: UUID, n: NormalizedAgent) ->
         },
     ).returning(Agent.id)
     row = (await db.execute(stmt)).one()
+
+    if not allowed:
+        # Agent is new (no product_line_id yet). Log at INFO so it's visible
+        # in Vercel runtime logs and easy to find the UUID for manual assignment.
+        logger.info(
+            "NEW agent added to DB (needs product_line_id before calls route): "
+            "vendor_agent_id=%s name=%s db_agent_id=%s",
+            n.vendor_agent_id, n.name, row.id,
+        )
+        return None  # still not allowed for call routing
+
     return row.id
 
 
