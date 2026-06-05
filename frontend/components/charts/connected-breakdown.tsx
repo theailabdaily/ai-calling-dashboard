@@ -19,12 +19,12 @@ const SEGMENTS: Array<{
   funnelStage?: string;   // for click-through; absent = not drillable
   description: string;
 }> = [
-  { key: 'high',          label: 'HIGH',          color: 'bg-emerald-600', funnelStage: 'interested', description: 'Strongest qualified intent. Hunar tags this rarely.' },
-  { key: 'medium',        label: 'MEDIUM',        color: 'bg-emerald-400', funnelStage: 'interested', description: 'The real warm-lead pool. HIGH+MEDIUM together = "Interested".' },
-  { key: 'low',           label: 'LOW',           color: 'bg-amber-400',                                description: 'Said no. Some still ask for callback — worth re-engaging.' },
-  { key: 'not_covered',   label: 'NOT COVERED',   color: 'bg-slate-400',                                description: 'Bot did not reach the qualifying question. Call cut early or off-topic.' },
-  { key: 'not_available', label: 'NOT AVAILABLE', color: 'bg-slate-300',                                description: 'Audio quality issue or call ended before classification. Effectively unreviewable.' },
-  { key: 'unclassified',  label: 'OTHER',         color: 'bg-surface-300',                              description: 'Missing or unrecognised interest_level value. Edge cases.' },
+  { key: 'high',          label: 'HIGH',          color: 'bg-emerald-600', funnelStage: 'interested', description: 'Strongest interest signal. UGC NET: HIGH interest_level. UPSC: serious upsc_interest_status or counsellor_scheduled.' },
+  { key: 'medium',        label: 'MEDIUM',        color: 'bg-emerald-400', funnelStage: 'interested', description: 'Good interest signal. UGC NET: MEDIUM interest_level. UPSC: exploratory upsc_interest_status. HIGH+MEDIUM = Interested.' },
+  { key: 'low',           label: 'LOW',           color: 'bg-amber-400',                                description: 'Low interest. UGC NET: LOW. UPSC: casual upsc_interest_status. Some still request follow-up.' },
+  { key: 'not_covered',   label: 'NOT COVERED',   color: 'bg-slate-400',                                description: 'Bot did not qualify. UGC NET: NOT_COVERED. UPSC: not_interested or dropped upsc_interest_status.' },
+  { key: 'not_available', label: 'NOT AVAILABLE', color: 'bg-slate-300',                                description: 'Audio issue or call too short to classify. Effectively unclassifiable.' },
+  { key: 'unclassified',  label: 'OTHER',         color: 'bg-surface-300',                              description: 'Missing or unrecognised interest signal. Check agent result schema if this bucket is large.' },
 ];
 
 export default function ConnectedBreakdown({ data, total, filters }: Props) {
@@ -53,7 +53,7 @@ export default function ConnectedBreakdown({ data, total, filters }: Props) {
         <span className="text-[11px] text-surface-500">by interest level</span>
       </div>
       <p className="text-xs text-surface-500 mb-4">
-        Where the conversations went. HIGH + MEDIUM = the "Interested" funnel stage.
+        Where the conversations went. HIGH + MEDIUM (UGC NET) or serious/exploratory (UPSC) = the "Interested" funnel stage.
       </p>
 
       {/* Single stacked bar — proportions visible at a glance. */}
