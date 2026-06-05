@@ -20,8 +20,11 @@ class Settings(BaseSettings):
     hunar_api_key: str | None = None
     hunar_base_url: str = "https://api.voice.hunar.ai/external/v1"
 
-    # Hunar — UPSC bot (separate Hunar org / API key)
+    # Hunar — UPSC bot (separate Hunar org / API key).
+    # Env var: HUNAR_UPSC_API_KEY — added to Vercel 2026-06-05.
     # Syncs under vendor slug "hunar-upsc" so its calls never mix with UGC NET.
+    # NOTE: changing this comment forces a fresh Vercel deployment so
+    # @lru_cache on get_settings() picks up the newly-added env var.
     hunar_upsc_api_key: str | None = None
     hunar_upsc_base_url: str = "https://api.voice.hunar.ai/external/v1"
 
@@ -35,9 +38,9 @@ class Settings(BaseSettings):
 
     # Webhooks — public URL where Hunar can reach us
     public_webhook_base_url: str | None = None
-    webhook_shared_secret: str | None = None        # we'll add HMAC verification when Hunar supports it
-    cron_shared_secret: str | None = None        # external cron trigger auth (Cloudflare Worker)
-    auth_log_secret: str | None = None           # NextAuth → backend audit-log write auth
+    webhook_shared_secret: str | None = None
+    cron_shared_secret: str | None = None
+    auth_log_secret: str | None = None
 
     # Sync cadence
     sync_calls_interval_minutes: int = 15
