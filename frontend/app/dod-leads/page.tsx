@@ -22,9 +22,9 @@ type Bucket = {
 };
 
 const BUCKETS: Bucket[] = [
-  { key: 'top_priority',    label: 'Top Priority',     hint: 'Interested + Callback', accent: true },
-  { key: 'interested_only', label: 'Interested only',  hint: 'HIGH/MEDIUM, no callback ask' },
-  { key: 'callback_only',   label: 'Callback only',    hint: 'Asked callback, low/unclear interest' },
+  { key: 'top_priority',    label: 'Top Priority',     hint: 'Interested + requested follow-up', accent: true },
+  { key: 'interested_only', label: 'Interested only',  hint: 'Interested, no follow-up ask' },
+  { key: 'callback_only',   label: 'Callback only',    hint: 'Follow-up requested, unclear interest' },
   { key: 'no_intent',       label: 'No intent',        hint: 'Connected but no positive signal' },
 ];
 
