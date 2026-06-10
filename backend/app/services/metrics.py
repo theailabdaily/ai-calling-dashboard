@@ -321,6 +321,73 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
     unique_interested_only = int(_brow.interested_only or 0)
     unique_callback_only   = int(_brow.callback_only or 0)
     unique_no_intent       = int(_brow.no_intent or 0)
+
+    # --- UPSC-only priority segmentation (REPLACES the 4 buckets on UPSC) ---------
+    # A temperature ladder, as a mutually-exclusive priority cascade (first match
+    # wins) that partitions Connected exactly (sum == unique_connected, zero
+    # overlap). UGC NET never enters this block.
+    #
+    #   Hot       = engaged AND (serious OR counsellor OR follow-up)
+    #   Hot Warm  = else engaged AND >60s AND full-time/side-by-side
+    #   Cold Warm = else engaged (real conversation, but agent captured no signal
+    #               — human re-qualify pool; big while CRM capture is broken)
+    #   No Intent = else (connected but never engaged — mostly quick drops)
+    #
+    # Reads BOTH the named result keys and Agent Nirnay's crm_field_N keys, and
+    # treats the agent's placeholder junk (field-name echo, "not available", etc.)
+    # as no-signal. Cold Warm shrinks and Hot/Hot-Warm grow as the agent fix lands.
+    #
+    # Field map (Nirnay): 16=interest, 19=call_outcome, 21=counsellor_scheduled,
+    # 23=follow_up_required, 8=preparation_mode, 13=working_professional.
+    upsc_tiers = None
+    if (filters.product_line_slug or "").lower() == "upsc":
+        def _u(named: str, crm: str):
+            # named key first, else Nirnay's crm_field_N; lowercased for matching
+            return func.lower(func.coalesce(CallLog.result[named].astext, CallLog.result[crm].astext))
+        _u_int  = _u("upsc_interest_status", "crm_field_16")
+        _u_out  = _u("call_outcome",         "crm_field_19")
+        _u_fu   = _u("follow_up_required",    "crm_field_23")
+        _u_cns  = _u("counsellor_scheduled",  "crm_field_21")
+        _u_prep = _u("preparation_mode",      "crm_field_8")
+        _u_wp   = _u("working_professional",  "crm_field_13")
+        # Lead-level signal aggregation across the lead's connected calls.
+        _u_lead = (
+            select(
+                func.bool_or(_is_engaged).label("eng"),
+                func.max(CallLog.duration_seconds).label("max_dur"),
+                func.bool_or(_u_int == "serious").label("serious"),
+                func.bool_or(or_(_u_out == "counsellor_scheduled", _u_cns == "true")).label("counsellor"),
+                func.bool_or(_u_fu == "true").label("followup"),
+                func.bool_or(or_(_u_prep.in_(["full-time", "side-by-side"]), _u_wp == "true")).label("prep_strong"),
+            )
+            .where(and_(_is_connected, CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
+            .group_by(CallLog.mobile_number)
+        )
+        _u_lead = filters.apply(_u_lead).subquery()
+        _hot  = and_(_u_lead.c.eng, or_(_u_lead.c.serious, _u_lead.c.counsellor, _u_lead.c.followup))
+        _warm = and_(_u_lead.c.eng, _u_lead.c.max_dur > 60, _u_lead.c.prep_strong)
+        _u_tier = select(
+            case(
+                (_hot, literal("hot")),
+                (_warm, literal("hot_warm")),
+                (_u_lead.c.eng, literal("cold_warm")),     # engaged, no signal captured
+                else_=literal("no_intent"),                # never engaged
+            ).label("tier")
+        ).select_from(_u_lead).subquery()
+        _u_stmt = select(
+            func.count().filter(_u_tier.c.tier == "hot").label("hot"),
+            func.count().filter(_u_tier.c.tier == "hot_warm").label("hot_warm"),
+            func.count().filter(_u_tier.c.tier == "cold_warm").label("cold_warm"),
+            func.count().filter(_u_tier.c.tier == "no_intent").label("no_intent"),
+        ).select_from(_u_tier)
+        _urow = (await db.execute(_u_stmt)).one()
+        upsc_tiers = {
+            "hot":       int(_urow.hot or 0),
+            "hot_warm":  int(_urow.hot_warm or 0),
+            "cold_warm": int(_urow.cold_warm or 0),
+            "no_intent": int(_urow.no_intent or 0),
+        }
+
     connected = int(row.connected_calls or 0)
     failed = int(row.failed_calls or 0)
     engaged = int(row.engaged_calls or 0)
@@ -464,6 +531,9 @@ async def compute_overview_metrics(db: AsyncSession, filters: MetricFilters) -> 
         "unique_callback_only_leads": unique_callback_only,
         "unique_interested_only_leads": unique_interested_only,
         "unique_no_intent_leads": unique_no_intent,
+        # UPSC-only: Hot/Warm/Low/Other priority tiers (null on other workspaces).
+        # Sums to unique_connected_leads; UGC NET keeps the 4 buckets above.
+        "upsc_priority_tiers": upsc_tiers,
         "connected_calls": connected,
         "failed_calls": failed,
         "avg_duration_seconds": float(row.avg_duration_sec or 0),
