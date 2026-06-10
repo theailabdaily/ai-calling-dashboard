@@ -76,6 +76,15 @@ class DuplicateCampaign(BaseModel):
     shared_leads: int = 0
 
 
+class UpscPriorityTiers(BaseModel):
+    """UPSC-only priority cascade (Hot > Hot-Warm > Cold-Warm > No-Intent).
+    Null on non-UPSC workspaces. The four sum to unique_connected_leads."""
+    hot: int = 0
+    hot_warm: int = 0
+    cold_warm: int = 0
+    no_intent: int = 0
+
+
 class OverviewMetrics(BaseModel):
     total_calls: int
     # row_count = lead-attempts in slice (one row per campaign × phone). Used
@@ -110,6 +119,9 @@ class OverviewMetrics(BaseModel):
     # exactly one. Sum (~) connected_calls.
     unique_interested_only_leads: int = 0    # Interested NOT Callback
     unique_no_intent_leads: int = 0          # Connected, no positive signal
+    # UPSC-only priority tiers (Hot/Hot-Warm/Cold-Warm/No-Intent); null on other
+    # workspaces. Must be declared here or FastAPI's response_model strips it.
+    upsc_priority_tiers: UpscPriorityTiers | None = None
     attempts_per_lead: float = 0.0
     lead_conversion_rate: float = 0.0
     # Visual breakdowns — populate the charts below the funnel.
