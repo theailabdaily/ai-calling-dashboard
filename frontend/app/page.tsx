@@ -129,11 +129,53 @@ export default function OverviewPage() {
         />
       </div>
 
-      {/* ── Row 2 — Sales action breakdown ────────────────────────────────
-          Every Connected lead lands in EXACTLY ONE of these four buckets.
-          Sum equals Connected (within ~2 unclassified). Each card is a
-          clickable filter so a sales/QA person can pull that exact list.
-          Top Priority is highlighted (accent) — call these first.        */}
+      {/* ── Row 2 — Sales action breakdown (UGC) / Priority tiers (UPSC) ─────
+          Every Connected lead lands in EXACTLY ONE card; the cards sum to
+          Connected (zero overlap). On UPSC we show Yatin's Hot/Warm/Low
+          priority cascade (+ Other catch-all); every other workspace keeps the
+          original 4 buckets. The backend decides via `upsc_priority_tiers`. */}
+      {m?.upsc_priority_tiers ? (
+        <div className="card p-4 md:p-5">
+          <div className="flex items-baseline justify-between mb-1">
+            <h3 className="text-sm font-semibold text-brand-navy">
+              Lead priority
+              <span className="text-surface-500 font-normal ml-2">
+                · {fmt.int(m.unique_connected_leads)} connected leads, one priority tier each
+              </span>
+            </h3>
+          </div>
+          <p className="text-xs text-surface-500 mb-4">
+            Temperature ladder — work top-down. Each connected lead sits in exactly one tier. Tap any (i) for its definition. Hot &amp; Hot-Warm grow, Cold-Warm shrinks, as the agent&rsquo;s CRM capture improves.
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+            <MetricCard
+              label="🔥 Hot"
+              value={fmt.int(m.upsc_priority_tiers.hot)}
+              hint="Engaged + clear buying signal"
+              tooltip="Engaged AND a real buying signal was captured: interest = serious, OR a counsellor call was scheduled, OR a follow-up was requested. Call these first."
+              accent
+            />
+            <MetricCard
+              label="🟡 Hot Warm"
+              value={fmt.int(m.upsc_priority_tiers.hot_warm)}
+              hint="Engaged, long talk, full-time / side-by-side"
+              tooltip="Not Hot, but engaged with a real conversation (>60s) and a full-time or side-by-side aspirant. Strong second priority — qualify and push to counsellor."
+            />
+            <MetricCard
+              label="🟠 Cold Warm"
+              value={fmt.int(m.upsc_priority_tiers.cold_warm)}
+              hint="Engaged, but agent captured no signal"
+              tooltip="Engaged — the lead had a genuine conversation — but the agent captured no qualifying signal (interest / counsellor / follow-up / prep). A human should re-qualify these; they are NOT low-value. This tier is large only because the agent's CRM capture is incomplete, and shrinks as it's fixed."
+            />
+            <MetricCard
+              label="⚪ No Intent"
+              value={fmt.int(m.upsc_priority_tiers.no_intent)}
+              hint="Connected but never engaged"
+              tooltip="Connected but never reached ENGAGED — picked up but no real conversation (mostly quick drops). No buying intent shown. Lowest priority."
+            />
+          </div>
+        </div>
+      ) : (
       <div className="card p-4 md:p-5">
         <div className="flex items-baseline justify-between mb-1">
           <h3 className="text-sm font-semibold text-brand-navy">
@@ -180,6 +222,7 @@ export default function OverviewPage() {
           />
         </div>
       </div>
+      )}
 
       {/* Calls-over-time + Funnel side-by-side. Funnel is the visual centerpiece. */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 md:gap-4">
