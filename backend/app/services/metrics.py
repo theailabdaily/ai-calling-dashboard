@@ -59,15 +59,17 @@ class MetricFilters:
     agent_ids: list[UUID] | None = None
     product_line_slug: str | None = None  # filters via agents.product_line_id → product_lines.slug
 
-    def apply(self, stmt):
+    def apply(self, stmt, include_date: bool = True):
         conds = []
         # Filter by call ACTIVITY date (when the call ended, or upload date for
         # never-dialed rows). See `_activity_at` definition below. This is what
         # the Leads page uses, so picking "Today" on the date range surfaces the
         # same leads on Overview / Call Logs / Funnel as on the Leads table.
-        if self.start:
+        # include_date=False lets callers apply ONLY workspace/vendor/campaign
+        # scoping (e.g. dod-leads, which does its own client-side date picking).
+        if include_date and self.start:
             conds.append(_activity_at >= self.start)
-        if self.end:
+        if include_date and self.end:
             conds.append(_activity_at <= self.end)
         if self.vendor_ids:
             conds.append(CallLog.vendor_id.in_(self.vendor_ids))
