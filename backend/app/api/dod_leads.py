@@ -30,24 +30,35 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api._filters import parse_filters
 from app.database import get_db
 from app.models import CallLog, Campaign
 from app.schemas import DodLeadCampaign, DodLeadDay, DodLeadsResponse
+from app.services.metrics import MetricFilters
 
 router = APIRouter(prefix="/api/dod-leads", tags=["dod-leads"])
 
 
 # Predicates — kept identical to metrics.py / calls.py / exports.py so the
 # tile counts here match the ones on overview and the call-logs filters.
+# Dual-schema: reads BOTH UGC NET (interest_level / next_step_interest) and
+# UPSC (upsc_interest_status / call_outcome) result fields, so each workspace
+# classifies on its own signal.
 _is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
-_is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
-_wants_callback = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
+_is_interested = or_(
+    func.coalesce(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]), False),
+    func.coalesce(func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]), False),
+)
+_wants_callback = or_(
+    func.coalesce(func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK", False),
+    func.coalesce(func.upper(CallLog.result["call_outcome"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]), False),
+)
 
 
-def _phone_level_subquery(group_by_campaign: bool):
+def _phone_level_subquery(filters: MetricFilters, group_by_campaign: bool):
     """Per-phone aggregation that flattens multiple call_logs rows for the
     same phone into a single row with bool_or signals + final timestamp.
 
@@ -61,6 +72,10 @@ def _phone_level_subquery(group_by_campaign: bool):
     each with its own final_at within that campaign. When False, group
     by mobile_number only — one row per phone with the globally latest
     timestamp.
+
+    `filters` scopes to the active workspace (product_line) + vendor +
+    campaign. Date is NOT applied here (include_date=False) — the page
+    does its own client-side date-range picking over the full result.
     """
     final_at = func.coalesce(CallLog.ended_at, CallLog.vendor_created_at)
 
@@ -76,25 +91,27 @@ def _phone_level_subquery(group_by_campaign: bool):
         cols.append(CallLog.campaign_id.label("campaign_id"))
         group_cols.append(CallLog.campaign_id)
 
-    stmt = (
-        select(*cols)
-        .where(and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != ""))
-        .group_by(*group_cols)
+    stmt = select(*cols).where(
+        and_(CallLog.mobile_number.isnot(None), CallLog.mobile_number != "")
     )
+    stmt = filters.apply(stmt, include_date=False)  # workspace/vendor/campaign only
+    stmt = stmt.group_by(*group_cols)
     return stmt.subquery()
 
 
 @router.get("", response_model=DodLeadsResponse)
-async def get_dod_leads(db: AsyncSession = Depends(get_db)):
+async def get_dod_leads(
+    db: AsyncSession = Depends(get_db),
+    filters: MetricFilters = Depends(parse_filters),
+):
     """Return all final-status-days with campaign breakdown, newest first.
 
-    No query params in v1 — the table is small (one row per status day,
-    typically < 100 rows even after a year of operation). The frontend
-    applies date-range filtering client-side. If we later need backend
-    date scoping, plug it in via Depends(parse_filters) at the router.
+    Scoped to the active workspace (product_line) so UPSC and UGC NET are
+    fully separated. Date-range is intentionally NOT applied server-side —
+    the frontend filters dates client-side over the full workspace result.
     """
     # ---- Day-level aggregation ----
-    pl_day = _phone_level_subquery(group_by_campaign=False)
+    pl_day = _phone_level_subquery(filters, group_by_campaign=False)
     day_ist = func.date(func.timezone("Asia/Kolkata", pl_day.c.final_at)).label("day_ist")
 
     # For each phone, classify into exactly one bucket. The buckets are
@@ -124,7 +141,7 @@ async def get_dod_leads(db: AsyncSession = Depends(get_db)):
     # for the human-readable name. Display_name preferred over raw name —
     # display_name is the user-facing label (synced from Hunar's UI),
     # name is the underlying request id.
-    pl_camp = _phone_level_subquery(group_by_campaign=True)
+    pl_camp = _phone_level_subquery(filters, group_by_campaign=True)
     camp_day_ist = func.date(func.timezone("Asia/Kolkata", pl_camp.c.final_at)).label("day_ist")
 
     camp_agg = (
