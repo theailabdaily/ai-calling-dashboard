@@ -94,6 +94,10 @@ _SOURCE_LABELS = {
     "no_intent":       "Connected — no positive signal",
     "hotleads":        "Hot leads (Interested OR Callback)",
     "followup":        "Callback",
+    # UPSC tier aliases (map into the same 4 response slots)
+    "hot":       "Hot — engaged + strong signal",
+    "hot_warm":  "Hot Warm — engaged + prep signal",
+    "cold_warm": "Cold Warm — engaged, no CRM signal",
 }
 
 
@@ -147,11 +151,11 @@ def _filename_for(funnel_stage: str | None) -> str:
     Stamp is IST regardless of container TZ.
     """
     stamp = datetime.now(IST).strftime("%d%m%y_%H%M")
-    if funnel_stage in ("top_priority", "hotleads"):
+    if funnel_stage in ("top_priority", "hotleads", "hot"):
         prefix = "INTC"
-    elif funnel_stage in ("interested_only", "interested"):
+    elif funnel_stage in ("interested_only", "interested", "hot_warm"):
         prefix = "INT"
-    elif funnel_stage in ("callback_only", "callback", "followup"):
+    elif funnel_stage in ("callback_only", "callback", "followup", "cold_warm"):
         prefix = "CALLB"
     else:
         prefix = "LEADS"
@@ -222,23 +226,52 @@ async def export_calls(
     if only_with_recording:
         extra.append(CallLog.recording_url.isnot(None))
     if only_interested:
-        extra.append(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]))
+        extra.append(or_(
+            func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]),
+            func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]),
+            func.upper(CallLog.result["crm_field_16"].astext).in_(["SERIOUS", "EXPLORATORY"]),
+        ))
     if failed_only:
         extra.append(CallLog.status.in_(("FAILED", "NOT_CONNECTED", "CANCELLED")))
 
-    # Funnel-stage filter — for the funnel drill-down's "export this stage" link.
-    # Same definition as calls.py and metrics.py: connected = COMPLETED + HUMAN.
+    # Funnel-stage filter — same definition as calls.py and metrics.py.
+    # Dual-schema: reads BOTH UGC NET and UPSC result fields so each workspace
+    # filters on its own signal. UPSC tier aliases (hot/hot_warm/cold_warm)
+    # map into the same 4 slots used by the Leads page.
     if funnel_stage:
         is_connected = and_(CallLog.lifecycle_status == "COMPLETED", CallLog.answered_by == "HUMAN")
-        is_interested = func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"])
-        wants_callback = func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK"
+        is_interested = or_(
+            func.coalesce(func.upper(CallLog.result["interest_level"].astext).in_(["HIGH", "MEDIUM"]), False),
+            func.coalesce(func.upper(CallLog.result["upsc_interest_status"].astext).in_(["SERIOUS", "EXPLORATORY"]), False),
+            func.coalesce(func.upper(CallLog.result["crm_field_16"].astext).in_(["SERIOUS", "EXPLORATORY"]), False),
+        )
+        wants_callback = or_(
+            func.coalesce(func.upper(CallLog.result["next_step_interest"].astext) == "CALLBACK", False),
+            func.coalesce(func.upper(CallLog.result["call_outcome"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]), False),
+            func.coalesce(func.upper(CallLog.result["crm_field_19"].astext).in_(["CALLBACK_REQUESTED", "COUNSELLOR_SCHEDULED"]), False),
+        )
+        # UPSC-specific signals
+        def _u(named, crm):
+            return func.lower(func.coalesce(CallLog.result[named].astext, CallLog.result[crm].astext))
+        _u_int  = _u("upsc_interest_status", "crm_field_16")
+        _u_out  = _u("call_outcome",          "crm_field_19")
+        _u_cns  = _u("counsellor_scheduled",  "crm_field_21")
+        _u_fu   = _u("follow_up_required",    "crm_field_23")
+        _u_prep = _u("preparation_mode",      "crm_field_8")
+        _u_wp   = _u("working_professional",  "crm_field_13")
+        _engaged     = and_(is_connected, CallLog.engagement_status == "ENGAGED")
+        _serious     = and_(is_connected, _u_int == "serious")
+        _counsellor  = and_(is_connected, or_(_u_out == "counsellor_scheduled", _u_cns == "true"))
+        _followup    = and_(is_connected, _u_fu == "true")
+        _prep_strong = and_(is_connected, or_(_u_prep.in_(["full-time", "side-by-side"]), _u_wp == "true"))
+        _hot_sig = or_(_serious, _counsellor, _followup)
 
         if funnel_stage == "leads":
             pass
         elif funnel_stage == "connected":
             extra.append(is_connected)
         elif funnel_stage == "engaged":
-            extra.append(and_(is_connected, CallLog.engagement_status == "ENGAGED"))
+            extra.append(_engaged)
         elif funnel_stage == "interested":
             extra.append(and_(is_connected, is_interested))
         elif funnel_stage == "callback":
@@ -251,6 +284,13 @@ async def export_calls(
             extra.append(and_(is_connected, is_interested, ~wants_callback))
         elif funnel_stage == "no_intent":
             extra.append(and_(is_connected, ~is_interested, ~wants_callback))
+        # UPSC tier aliases
+        elif funnel_stage == "hot":
+            extra.append(and_(_engaged, _hot_sig))
+        elif funnel_stage == "hot_warm":
+            extra.append(and_(_engaged, ~_hot_sig, CallLog.duration_seconds > 60, _prep_strong))
+        elif funnel_stage == "cold_warm":
+            extra.append(and_(_engaged, ~_hot_sig, ~and_(CallLog.duration_seconds > 60, _prep_strong)))
         # Legacy aliases
         elif funnel_stage == "hotleads":
             extra.append(and_(is_connected, or_(is_interested, wants_callback)))
