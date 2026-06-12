@@ -134,8 +134,43 @@ async def list_calls(
             # NOT_AVAILABLE. These are the "had a chance, said no" pool —
             # useful for QA-ing the bot's pitch.
             extra.append(and_(is_connected, ~is_interested, ~wants_callback))
-        # Legacy stage names — kept for any bookmarked deep-links from the
-        # earlier funnel structure. Behave as their semantic descendants.
+        # UPSC tier aliases — used when clicking through from the UPSC Leads /
+        # Overview cards. Map to the same engagement-based tier logic.
+        elif funnel_stage == "hot":
+            _u_int = func.lower(func.coalesce(CallLog.result["upsc_interest_status"].astext, CallLog.result["crm_field_16"].astext))
+            _u_out = func.lower(func.coalesce(CallLog.result["call_outcome"].astext, CallLog.result["crm_field_19"].astext))
+            _u_cns = func.lower(func.coalesce(CallLog.result["counsellor_scheduled"].astext, CallLog.result["crm_field_21"].astext))
+            _u_fu  = func.lower(func.coalesce(CallLog.result["follow_up_required"].astext, CallLog.result["crm_field_23"].astext))
+            extra.append(and_(
+                is_connected, CallLog.engagement_status == "ENGAGED",
+                or_(_u_int == "serious", _u_out == "counsellor_scheduled", _u_cns == "true", _u_fu == "true"),
+            ))
+        elif funnel_stage == "hot_warm":
+            _u_int = func.lower(func.coalesce(CallLog.result["upsc_interest_status"].astext, CallLog.result["crm_field_16"].astext))
+            _u_out = func.lower(func.coalesce(CallLog.result["call_outcome"].astext, CallLog.result["crm_field_19"].astext))
+            _u_cns = func.lower(func.coalesce(CallLog.result["counsellor_scheduled"].astext, CallLog.result["crm_field_21"].astext))
+            _u_fu  = func.lower(func.coalesce(CallLog.result["follow_up_required"].astext, CallLog.result["crm_field_23"].astext))
+            _u_prep = func.lower(func.coalesce(CallLog.result["preparation_mode"].astext, CallLog.result["crm_field_8"].astext))
+            _u_wp   = func.lower(func.coalesce(CallLog.result["working_professional"].astext, CallLog.result["crm_field_13"].astext))
+            _hot_sig = or_(_u_int == "serious", _u_out == "counsellor_scheduled", _u_cns == "true", _u_fu == "true")
+            extra.append(and_(
+                is_connected, CallLog.engagement_status == "ENGAGED", ~_hot_sig,
+                CallLog.duration_seconds > 60,
+                or_(_u_prep.in_(["full-time", "side-by-side"]), _u_wp == "true"),
+            ))
+        elif funnel_stage == "cold_warm":
+            _u_int = func.lower(func.coalesce(CallLog.result["upsc_interest_status"].astext, CallLog.result["crm_field_16"].astext))
+            _u_out = func.lower(func.coalesce(CallLog.result["call_outcome"].astext, CallLog.result["crm_field_19"].astext))
+            _u_cns = func.lower(func.coalesce(CallLog.result["counsellor_scheduled"].astext, CallLog.result["crm_field_21"].astext))
+            _u_fu  = func.lower(func.coalesce(CallLog.result["follow_up_required"].astext, CallLog.result["crm_field_23"].astext))
+            _u_prep = func.lower(func.coalesce(CallLog.result["preparation_mode"].astext, CallLog.result["crm_field_8"].astext))
+            _u_wp   = func.lower(func.coalesce(CallLog.result["working_professional"].astext, CallLog.result["crm_field_13"].astext))
+            _hot_sig = or_(_u_int == "serious", _u_out == "counsellor_scheduled", _u_cns == "true", _u_fu == "true")
+            extra.append(and_(
+                is_connected, CallLog.engagement_status == "ENGAGED", ~_hot_sig,
+                ~and_(CallLog.duration_seconds > 60, or_(_u_prep.in_(["full-time", "side-by-side"]), _u_wp == "true")),
+            ))
+        # Legacy stage names
         elif funnel_stage == "hotleads":
             # Old union "interested OR callback" — redirect to the new
             # callback stage which is the broader of the two signals.
